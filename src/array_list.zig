@@ -1,3 +1,126 @@
+pub fn ArrayList(comptime T: type) type {
+    return ArrayListAligned(T, null);
+}
+
+pub fn ArrayListAligned(comptime T: type, comptime A: ?Alignment) type {
+    if (A) |alignment| {
+        if (alignment == Alignment.of(T))
+            return ArrayListAligned(T, null);
+    }
+
+    return struct {
+        const Self = @This();
+
+        pub const Item = Bounded.Item;
+        pub const item_alignment = Bounded.item_alignment;
+
+        pub const OOM = collections.OOM;
+
+        const Bounded = BoundedArrayListAligned(T, A);
+
+        bounded: Bounded,
+
+        pub fn init(allocator: Allocator, min_capacity: usize) OOM!Self {
+            const capacity = try capacityFor(min_capacity);
+            const items = try allocator.alignedAlloc(Item, A, capacity);
+            return .{ .bounded = .init(&items) };
+        }
+
+        pub fn deinit(self: *Self, allocator: Allocator) void {
+            if (self.bounded.capacity == 0)
+                return;
+            allocator.free(self.bounded.items);
+        }
+
+        pub fn isEmpty(self: *const Self) bool {
+            return self.bounded.isEmpty();
+        }
+
+        pub fn appendAt(self: *Self, allocator: Allocator, idx: usize) OOM!*Item {
+            return self.bounded.appendAt(idx) catch blk: {
+                try self.grow(allocator);
+                break :blk self.bounded.appendAt(idx) catch unreachable;
+            };
+        }
+
+        pub fn append(self: *Self, allocator: Allocator) OOM!*Item {
+            return self.appendAt(allocator, self.bounded.items.len);
+        }
+
+        pub fn appendSliceAt(
+            self: *Self,
+            allocator: Allocator,
+            len: usize,
+            idx: usize,
+        ) OOM![]Item {
+            return self.bounded.appendSliceAt(len, idx) catch blk: {
+                try self.grow(allocator);
+                break :blk self.bounded.appendSliceAt(len, idx) catch unreachable;
+            };
+        }
+
+        pub fn appendSlice(
+            self: *Self,
+            allocator: Allocator,
+            len: usize,
+        ) OOM![]Item {
+            return self.appendSliceAt(allocator, len, self.bounded.items);
+        }
+
+        pub fn pushAt(
+            self: *Self,
+            allocator: Allocator,
+            idx: usize,
+            item: Item,
+        ) OOM!void {
+            const ptr = try self.appendAt(allocator, idx);
+            ptr.* = item;
+        }
+
+        pub fn push(
+            self: *Self,
+            allocator: Allocator,
+            item: Item,
+        ) OOM!void {
+            const ptr = try self.append(allocator);
+            ptr.* = item;
+        }
+
+        pub fn pushSliceAt(
+            self: *Self,
+            allocator: Allocator,
+            items: []const Item,
+            idx: usize,
+        ) OOM!void {
+            const slice = try self.appendSliceAt(allocator, items.len, idx);
+            @memcpy(slice, items);
+        }
+
+        pub fn pushSlice(
+            self: *Self,
+            allocator: Allocator,
+            items: []const Item,
+        ) OOM!void {
+            const slice = try self.appendSlice(allocator, items.len);
+            @memcpy(slice, items);
+        }
+
+        fn grow(self: *Self, allocator: Allocator) OOM!void {
+            _ = self;
+            _ = allocator;
+            unreachable;
+        }
+    };
+}
+
+fn capacityFor(new_capacity: usize) collections.OOM!usize {
+    const min_allocation = 8;
+    if (new_capacity <= min_allocation)
+        return min_allocation;
+
+    return collections.nextPow2(new_capacity);
+}
+
 pub fn BoundedArrayList(comptime T: type) type {
     return BoundedArrayListAligned(T, null);
 }
@@ -35,6 +158,11 @@ pub fn BoundedArrayListAligned(
             return .{ .items = items[0..0], .capacity = items.len };
         }
 
+        /// Returns true if the list is empty.
+        pub fn isEmpty(self: *const Self) bool {
+            return self.items.len == 0;
+        }
+
         /// Copies all items from the other array over.
         pub fn copy(self: *Self, other: *const Self) OOM!void {
             if (self.capacity < other.items.len)
@@ -49,7 +177,11 @@ pub fn BoundedArrayListAligned(
             return self.capacity - self.items.len;
         }
 
-        pub fn ensureCapacity(self: *const Self, capacity: usize) OOM!void {
+        /// Ensures the required capacity is available.
+        ///
+        /// This is effectively a no-op. It just checks, if sufficient capacity
+        /// is available and returns an error otherwise.
+        pub fn reserve(self: *const Self, capacity: usize) OOM!void {
             if (self.remainingCapacity() < capacity) {
                 return error.OutOfMemory;
             }
@@ -119,7 +251,7 @@ pub fn BoundedArrayListAligned(
         ///
         /// Asserts that the index is within bounds or at most one after the
         /// consecutive slice of initialized items.
-        pub fn appendSliceAt(self: *Self, idx: usize, len: usize) OOM![]Item {
+        pub fn appendSliceAt(self: *Self, len: usize, idx: usize) OOM![]Item {
             if (self.items.len + len <= self.capacity) {
                 self.shiftForward(idx, len);
                 return self.items[idx..][0..len];
@@ -131,7 +263,7 @@ pub fn BoundedArrayListAligned(
         /// Reserves a number of uninitialized slots at the end of the item
         /// slice and returns the corresponding slice.
         pub fn appendSlice(self: *Self, len: usize) OOM![]Item {
-            return self.appendSliceAt(self.items.len, len);
+            return self.appendSliceAt(len, self.items.len);
         }
 
         /// Inserts the given item at the given index.
@@ -151,16 +283,25 @@ pub fn BoundedArrayListAligned(
             ptr.* = item;
         }
 
+        /// Inserts the given slice at the given index.
+        ///
+        /// Any initialized items after the given index are shifted forwards.
+        ///
+        /// Asserts that the index is within bounds or at most one after the
+        /// consecutive slice of initialized items.
         pub fn pushSliceAt(self: *Self, idx: usize, items: []const Item) OOM!void {
-            const slice = try self.appendSliceAt(idx, items.len);
+            const slice = try self.appendSliceAt(items.len, idx);
             @memcpy(slice, items);
         }
 
+        /// Inserts the given slice at the end of the item slice.
         pub fn pushSlice(self: *Self, items: []const Item) OOM!void {
             const slice = try self.appendSlice(items.len);
             @memcpy(slice, items);
         }
 
+        /// Removes and returns the last item in the list or returns null, if
+        /// the list is empty.
         pub fn pop(self: *Self) ?Item {
             if (self.items.len == 0)
                 return null;
@@ -207,16 +348,6 @@ pub fn BoundedArrayListAligned(
             self.items.len -= 1;
         }
     };
-}
-
-fn capacityFor(capacity: usize) collections.OOM!usize {
-    const min_capacity = 8;
-
-    if (capacity <= min_capacity) {
-        return min_capacity;
-    }
-
-    return collections.nextPow2(capacity);
 }
 
 const std = @import("std");
@@ -301,7 +432,7 @@ test "bounded append slice at" {
 
     var slice = try list.appendSlice(4);
     @memcpy(slice, &[_]i32{ 5, 6, 7, 8 });
-    slice = try list.appendSliceAt(0, 4);
+    slice = try list.appendSliceAt(4, 0);
     @memcpy(slice, &[_]i32{ 1, 2, 3, 4 });
 
     try tt.expectEqualSlices(i32, &.{ 1, 2, 3, 4, 5, 6, 7, 8 }, list.items);
@@ -365,18 +496,27 @@ test "swap remove" {
     try tt.expectEqual(4, list.remainingCapacity());
 }
 
-test "ensure capacity + push" {
+test "reserve and push" {
     var items: [8]i32 = undefined;
     var list: BoundedArrayList(i32) = .init(&items);
 
-    try list.ensureCapacity(4);
+    try list.reserve(4);
     list.push(1) catch unreachable;
     list.push(2) catch unreachable;
     list.push(3) catch unreachable;
     list.push(4) catch unreachable;
 
-    try list.ensureCapacity(4);
+    try list.reserve(4);
     list.pushSlice(&.{ 5, 6, 7, 8 }) catch unreachable;
 
     try tt.expectEqualSlices(i32, &.{ 1, 2, 3, 4, 5, 6, 7, 8 }, list.items);
+}
+
+test "clear" {
+    var items: [8]i32 = undefined;
+    var list: BoundedArrayList(i32) = .init(&items);
+    list.pushSlice(&.{ 1, 2, 3, 4, 5, 6, 7, 8 }) catch unreachable;
+    list.clear();
+
+    try tt.expectEqual(0, list.items.len);
 }
