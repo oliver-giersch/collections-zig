@@ -49,6 +49,12 @@ pub fn BoundedArrayListAligned(
             return self.capacity - self.items.len;
         }
 
+        pub fn ensureCapacity(self: *const Self, capacity: usize) OOM!void {
+            if (self.remainingCapacity() < capacity) {
+                return error.OutOfMemory;
+            }
+        }
+
         /// Returns a pointer to the last item in the list or null, if the list
         /// is empty.
         pub fn getLast(self: *Self) ?*Item {
@@ -197,7 +203,7 @@ pub fn BoundedArrayListAligned(
             const trailing_len = self.items.len - idx - 1;
             const trailing_items = self.items[idx + 1 ..][0..trailing_len];
             @memmove(self.items[idx..][0..trailing_len], trailing_items);
-            self.items[idx] = undefined;
+            self.items[self.items.len - 1] = undefined;
             self.items.len -= 1;
         }
     };
@@ -230,12 +236,50 @@ test "bounded empty" {
     try tt.expectEqual(null, list.getLast());
     try tt.expectEqual(null, list.getConstLast());
     try tt.expectError(collections.oom, list.push(1));
+
+    var items: [8]i32 = undefined;
+    list = .init(&items);
+    try tt.expectEqual(0, list.items.len);
+    try tt.expectEqual(items.len, list.capacity);
+    try tt.expectEqual(null, list.pop());
+    try tt.expectEqual(null, list.getLast());
+    try tt.expectEqual(null, list.getConstLast());
 }
 
-test "append at" {
+test "bounded append" {
     var items: [8]i32 = undefined;
     var list: BoundedArrayList(i32) = .init(&items);
-    try tt.expectEqual(items.len, list.capacity);
+
+    var ptr = try list.append();
+    ptr.* = 1;
+    ptr = try list.append();
+    ptr.* = 2;
+    ptr = try list.append();
+    ptr.* = 3;
+
+    try tt.expectEqualSlices(i32, &.{ 1, 2, 3 }, list.items);
+    try tt.expectEqual(3, list.items.len);
+    try tt.expectEqual(5, list.remainingCapacity());
+}
+
+test "bounded append slice" {
+    var items: [8]i32 = undefined;
+    var list: BoundedArrayList(i32) = .init(&items);
+
+    var slice = try list.appendSlice(4);
+    @memcpy(slice, &[_]i32{ 1, 2, 3, 4 });
+    slice = try list.appendSlice(4);
+    @memcpy(slice, &[_]i32{ 5, 6, 7, 8 });
+
+    try tt.expectEqualSlices(i32, &.{ 1, 2, 3, 4, 5, 6, 7, 8 }, list.items);
+    try tt.expectEqual(8, list.items.len);
+    try tt.expectEqual(0, list.remainingCapacity());
+    try tt.expectError(collections.oom, list.append());
+}
+
+test "bounded append at" {
+    var items: [8]i32 = undefined;
+    var list: BoundedArrayList(i32) = .init(&items);
 
     var ptr = try list.appendAt(0);
     ptr.* = 2;
@@ -249,4 +293,90 @@ test "append at" {
 
     try tt.expectEqualSlices(i32, &.{ 1, 2, 3 }, list.items);
     try tt.expectEqual(5, list.remainingCapacity());
+}
+
+test "bounded append slice at" {
+    var items: [8]i32 = undefined;
+    var list: BoundedArrayList(i32) = .init(&items);
+
+    var slice = try list.appendSlice(4);
+    @memcpy(slice, &[_]i32{ 5, 6, 7, 8 });
+    slice = try list.appendSliceAt(0, 4);
+    @memcpy(slice, &[_]i32{ 1, 2, 3, 4 });
+
+    try tt.expectEqualSlices(i32, &.{ 1, 2, 3, 4, 5, 6, 7, 8 }, list.items);
+    try tt.expectEqual(8, list.items.len);
+    try tt.expectEqual(0, list.remainingCapacity());
+    try tt.expectError(collections.oom, list.append());
+}
+
+test "pop" {
+    var items: [8]i32 = undefined;
+    var list: BoundedArrayList(i32) = .init(&items);
+    try list.pushSlice(&.{ 1, 2, 3, 4, 5, 6, 7, 8 });
+    try tt.expectEqual(8, list.items.len);
+    try tt.expectEqual(0, list.remainingCapacity());
+
+    for (0..items.len) |i| {
+        const s: i32 = @intCast(i);
+        try tt.expectEqual(@as(i32, items.len) - s, list.pop());
+        try tt.expectEqual(items.len - i - 1, list.items.len);
+        try tt.expectEqual(i + 1, list.remainingCapacity());
+    }
+
+    try tt.expectEqual(null, list.pop());
+    try tt.expectEqual(0, list.items.len);
+    try tt.expectEqual(8, list.remainingCapacity());
+}
+
+test "remove" {
+    var items: [8]i32 = undefined;
+    var list: BoundedArrayList(i32) = .init(&items);
+    try list.pushSlice(&.{ 1, 2, 3, 4, 5, 6, 7, 8 });
+
+    try tt.expectEqual(1, list.remove(0));
+    try tt.expectEqualSlices(i32, &.{ 2, 3, 4, 5, 6, 7, 8 }, list.items);
+    try tt.expectEqual(2, list.remove(0));
+    try tt.expectEqualSlices(i32, &.{ 3, 4, 5, 6, 7, 8 }, list.items);
+    try tt.expectEqual(4, list.remove(1));
+    try tt.expectEqualSlices(i32, &.{ 3, 5, 6, 7, 8 }, list.items);
+    try tt.expectEqual(7, list.remove(3));
+    try tt.expectEqualSlices(i32, &.{ 3, 5, 6, 8 }, list.items);
+
+    try tt.expectEqual(4, list.items.len);
+    try tt.expectEqual(4, list.remainingCapacity());
+}
+
+test "swap remove" {
+    var items: [8]i32 = undefined;
+    var list: BoundedArrayList(i32) = .init(&items);
+    try list.pushSlice(&.{ 1, 2, 3, 4, 5, 6, 7, 8 });
+
+    try tt.expectEqual(1, list.swapRemove(0));
+    try tt.expectEqualSlices(i32, &.{ 8, 2, 3, 4, 5, 6, 7 }, list.items);
+    try tt.expectEqual(2, list.swapRemove(1));
+    try tt.expectEqualSlices(i32, &.{ 8, 7, 3, 4, 5, 6 }, list.items);
+    try tt.expectEqual(4, list.swapRemove(3));
+    try tt.expectEqualSlices(i32, &.{ 8, 7, 3, 6, 5 }, list.items);
+    try tt.expectEqual(7, list.swapRemove(1));
+    try tt.expectEqualSlices(i32, &.{ 8, 5, 3, 6 }, list.items);
+
+    try tt.expectEqual(4, list.items.len);
+    try tt.expectEqual(4, list.remainingCapacity());
+}
+
+test "ensure capacity + push" {
+    var items: [8]i32 = undefined;
+    var list: BoundedArrayList(i32) = .init(&items);
+
+    try list.ensureCapacity(4);
+    list.push(1) catch unreachable;
+    list.push(2) catch unreachable;
+    list.push(3) catch unreachable;
+    list.push(4) catch unreachable;
+
+    try list.ensureCapacity(4);
+    list.pushSlice(&.{ 5, 6, 7, 8 }) catch unreachable;
+
+    try tt.expectEqualSlices(i32, &.{ 1, 2, 3, 4, 5, 6, 7, 8 }, list.items);
 }
