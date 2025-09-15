@@ -1,3 +1,6 @@
+const min_array_list_capacity = 8;
+const max_array_list_capacity = 1 << (@bitSizeOf(usize) - 1);
+
 pub fn ArrayList(comptime T: type) type {
     return ArrayListAligned(T, null);
 }
@@ -11,6 +14,9 @@ pub fn ArrayListAligned(comptime T: type, comptime A: ?Alignment) type {
     return struct {
         const Self = @This();
 
+        /// An empty array list initializer.
+        pub const empty: Self = .{ .bounded = .empty };
+
         pub const Item = Bounded.Item;
         pub const item_alignment = Bounded.item_alignment;
 
@@ -18,22 +24,70 @@ pub fn ArrayListAligned(comptime T: type, comptime A: ?Alignment) type {
 
         const Bounded = BoundedArrayListAligned(T, A);
 
+        /// The currently allocated (if non-zero capacity) bounded array list.
         bounded: Bounded,
 
         pub fn init(allocator: Allocator, min_capacity: usize) OOM!Self {
             const capacity = try capacityFor(min_capacity);
             const items = try allocator.alignedAlloc(Item, A, capacity);
-            return .{ .bounded = .init(&items) };
+            return .{ .bounded = .init(items) };
         }
 
+        /// Frees the backing bounded array list allocation, if any.
         pub fn deinit(self: *Self, allocator: Allocator) void {
             if (self.bounded.capacity == 0)
                 return;
-            allocator.free(self.bounded.items);
+            allocator.free(self.bounded.backingSlice());
         }
 
+        /// Returns true if the list is empty.
         pub fn isEmpty(self: *const Self) bool {
             return self.bounded.isEmpty();
+        }
+
+        pub fn clone(self: *const Self, allocator: Allocator) OOM!Self {
+            if (self.bounded.capacity == 0)
+                return .empty;
+
+            const items = try allocator.alignedAlloc(Item, A, self.bounded.capacity);
+            var bounded: Bounded = .init(&items);
+            bounded.copy(&self.bounded) catch unreachable;
+
+            return .{ .bounded = bounded };
+        }
+
+        /// Returns the remaining capacity of the list.
+        pub fn remainingCapacity(self: *const Self) usize {
+            return self.bounded.remainingCapacity();
+        }
+
+        pub fn getLast(self: *Self) ?*Item {
+            return self.bounded.getLast();
+        }
+
+        pub fn getConstLast(self: *const Self) ?*const Item {
+            return self.bounded.getConstLast();
+        }
+
+        pub fn clear(self: *Self) void {
+            self.bounded.clear();
+        }
+
+        pub fn reserve(self: *Self, allocator: Allocator, capacity: usize) OOM!void {
+            if (capacity >= max_array_list_capacity)
+                return error.OutOfMemory;
+
+            self.bounded.reserve(capacity) catch {
+                // No overflow possible, since capacity is less than `max_array_list_capacity`
+                // and the bounded array length is as well by definition.
+                const new_capacity = try capacityFor(self.bounded.items.len + capacity);
+                return self.growTo(allocator, new_capacity);
+            };
+        }
+
+        pub fn ensureCapacity(self: *Self, allocator: Allocator, capacity: usize) OOM!void {
+            if (capacity > self.bounded.capacity)
+                try self.reserve(allocator, capacity - self.bounded.capacity);
         }
 
         pub fn appendAt(self: *Self, allocator: Allocator, idx: usize) OOM!*Item {
@@ -54,7 +108,7 @@ pub fn ArrayListAligned(comptime T: type, comptime A: ?Alignment) type {
             idx: usize,
         ) OOM![]Item {
             return self.bounded.appendSliceAt(len, idx) catch blk: {
-                try self.grow(allocator);
+                try self.reserve(allocator, len);
                 break :blk self.bounded.appendSliceAt(len, idx) catch unreachable;
             };
         }
@@ -64,7 +118,7 @@ pub fn ArrayListAligned(comptime T: type, comptime A: ?Alignment) type {
             allocator: Allocator,
             len: usize,
         ) OOM![]Item {
-            return self.appendSliceAt(allocator, len, self.bounded.items);
+            return self.appendSliceAt(allocator, len, self.bounded.items.len);
         }
 
         pub fn pushAt(
@@ -105,20 +159,98 @@ pub fn ArrayListAligned(comptime T: type, comptime A: ?Alignment) type {
             @memcpy(slice, items);
         }
 
+        pub fn pop(self: *Self) ?Item {
+            return self.bounded.pop();
+        }
+
+        pub fn remove(self: *Self, idx: usize) Item {
+            return self.bounded.remove(idx);
+        }
+
+        pub fn swapRemove(self: *Self, idx: usize) Item {
+            return self.bounded.swapRemove(idx);
+        }
+
         fn grow(self: *Self, allocator: Allocator) OOM!void {
-            _ = self;
-            _ = allocator;
-            unreachable;
+            const capacity = self.bounded.capacity;
+            const new_capacity = try capacityFor(capacity + 1);
+            return self.growTo(allocator, new_capacity);
+        }
+
+        fn growTo(self: *Self, allocator: Allocator, new_capacity: usize) OOM!void {
+            assert(collections.isPow2(new_capacity));
+            const items = try allocator.realloc(self.bounded.items, new_capacity);
+            self.bounded.items.ptr = items.ptr;
+            self.bounded.capacity = new_capacity;
+        }
+
+        fn alloc(allocator: Allocator, capacity: usize) OOM![]align(item_alignment) Item {
+            assert(isPow2(capacity));
+            return allocator.alignedAlloc(Item, A, capacity);
         }
     };
 }
 
 fn capacityFor(new_capacity: usize) collections.OOM!usize {
-    const min_allocation = 8;
-    if (new_capacity <= min_allocation)
-        return min_allocation;
+    if (new_capacity <= min_array_list_capacity)
+        return min_array_list_capacity;
 
-    return collections.nextPow2(new_capacity);
+    return nextPow2(new_capacity);
+}
+
+test "max capacity" {
+    const max_capacity = try capacityFor(max_array_list_capacity);
+    const no_overflow = max_capacity + (max_capacity - 1);
+    try tt.expectError(collections.oom, capacityFor(no_overflow));
+}
+
+test "deinit" {
+    var list: ArrayList(i32) = .empty;
+    list.deinit(tt.allocator);
+    list = try .init(tt.allocator, 1024);
+    list.deinit(tt.allocator);
+}
+
+test "reserve" {
+    var list: ArrayList(i32) = .empty;
+    defer list.deinit(tt.allocator);
+
+    try list.reserve(tt.allocator, 4);
+    try tt.expectEqual(8, list.bounded.capacity);
+    list.bounded.pushSlice(&.{ 1, 2, 3, 4, 5, 6, 7, 8 }) catch unreachable;
+    try list.reserve(tt.allocator, 64);
+    try tt.expectEqual(128, list.bounded.capacity);
+    try tt.expectEqualSlices(i32, &.{ 1, 2, 3, 4, 5, 6, 7, 8 }, list.bounded.items);
+}
+
+test "append" {
+    var list: ArrayList(i32) = .empty;
+    defer list.deinit(tt.allocator);
+
+    var ptr = try list.append(tt.allocator);
+    ptr.* = 1;
+    ptr = try list.append(tt.allocator);
+    ptr.* = 2;
+    ptr = try list.append(tt.allocator);
+    ptr.* = 3;
+
+    try tt.expectEqualSlices(i32, &.{ 1, 2, 3 }, list.bounded.items);
+    try tt.expectEqual(3, list.bounded.items.len);
+    try tt.expectEqual(5, list.remainingCapacity());
+}
+
+test "append slice" {
+    var list: ArrayList(i32) = .empty;
+    defer list.deinit(tt.allocator);
+
+    var slice = try list.appendSlice(tt.allocator, 8);
+    @memcpy(slice, &[_]i32{ 1, 2, 3, 4, 5, 6, 7, 8 });
+    slice = try list.appendSlice(tt.allocator, 8);
+    @memcpy(slice, &[_]i32{ 9, 10, 11, 12, 13, 14, 15, 16 });
+
+    try tt.expectEqualSlices(i32, &.{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 }, list.bounded.items);
+    try tt.expectEqual(16, list.bounded.items.len);
+    try tt.expectEqual(0, list.remainingCapacity());
 }
 
 pub fn BoundedArrayList(comptime T: type) type {
@@ -137,7 +269,7 @@ pub fn BoundedArrayListAligned(
     return struct {
         const Self = @This();
 
-        /// An empty list initializer.
+        /// An empty array list initializer.
         pub const empty: Self = .{ .items = &.{} };
 
         pub const Item = T;
@@ -358,6 +490,8 @@ const Alignment = std.mem.Alignment;
 const Allocator = std.mem.Allocator;
 
 const collections = @import("root.zig");
+const isPow2 = collections.isPow2;
+const nextPow2 = collections.nextPow2;
 
 test "bounded empty" {
     var list: BoundedArrayList(i32) = .empty;
