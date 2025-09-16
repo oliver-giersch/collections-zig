@@ -1,3 +1,23 @@
+pub fn HashMap(comptime K: type, V: type, comptime O: Options) type {
+    return ContextHashMap(K, V, std.hash_map.AutoContext(K), O);
+}
+
+pub fn StringHashMap(comptime V: type, comptime O: Options) type {
+    return ContextHashMap([]const u8, V, StringContext, O);
+}
+
+pub const StringContext = struct {
+    const Self = @This();
+
+    pub fn eql(_: Self, a: []const u8, b: []const u8) bool {
+        return mem.eql(u8, a, b);
+    }
+
+    pub fn hash(_: Self, str: []const u8) Hash {
+        return Wyhash.hash(0, str);
+    }
+};
+
 /// A global (static) placeholder metadata vector used as default buffer pointer
 /// for allocation-less hash maps.
 var empty_vector: Metadata.Block = Metadata.repeat(.empty);
@@ -27,7 +47,7 @@ pub const Options = struct {
 
 pub const Hash = u64;
 
-pub fn HashMap(
+pub fn ContextHashMap(
     comptime K: type,
     comptime V: type,
     comptime C: type,
@@ -176,15 +196,18 @@ pub fn HashMap(
                 if (comptime multi_array) {
                     address = Alignment.of(Key).forward(address);
                     const keys: [*]Key = @ptrFromInt(address);
+                    @memset(keys[0..entries], undefined);
                     address += @sizeOf(Key) * entries;
 
                     address = Alignment.of(Value).forward(address);
                     const values: [*]Value = @ptrFromInt(address);
+                    @memset(values[0..entries], undefined);
                     address += @sizeOf(Value) * entries;
                     buffer.header = .{ .keys = keys, .values = values };
                 } else {
                     address = Alignment.of(KeyValue).forward(address);
                     const kvs: [*]KeyValue = @ptrFromInt(address);
+                    @memset(kvs[0..entries], undefined);
                     address += @sizeOf(KeyValue) * entries;
                     buffer.header = .{ .kvs = kvs };
                 }
@@ -371,6 +394,15 @@ pub fn HashMap(
             zst_ctx.reserve
         else {};
 
+        pub fn rehashContext(self: *Self, ctx: Context) void {
+            self.rehashInPlace(ctx);
+            self.remaining_capacity = self.getUsableCapacity() - self.len;
+        }
+
+        pub const rehash = if (is_zst_ctx)
+            zst_ctx.rehash
+        else {};
+
         /// Returns true, if the map contains the given key.
         pub fn containsContext(
             self: *const Self,
@@ -510,20 +542,20 @@ pub fn HashMap(
             ctx: Context,
         ) OOM!void {
             const hash, const hint = hashKey(key, ctx);
-            var idx = self.findInsertIdx(hash);
+            var entry_idx = self.findInsertIdx(hash);
 
-            if (self.metadata[idx].isEmpty()) {
+            if (self.metadata[entry_idx].isEmpty()) {
                 if (self.remaining_capacity == 0) {
                     @branchHint(.unlikely);
                     try self.grow(allocator, 1, ctx);
-                    idx = self.findInsertIdx(hash);
+                    entry_idx = self.findInsertIdx(hash);
                 }
 
                 self.remaining_capacity -= 1;
             }
 
-            self.insertKey(idx, key, hint);
-            self.getValue(idx).* = value;
+            self.insertKey(entry_idx, key, hint);
+            self.getValue(entry_idx).* = value;
         }
 
         pub const insertUnique = if (is_zst_ctx)
@@ -557,24 +589,24 @@ pub fn HashMap(
             ctx: Context,
         ) OOM!GetOrInsert {
             const hash, const hint = hashKey(key, ctx);
-            var idx, const found = self.findGetOrInsertIdx(key, hash, hint, ctx);
+            var entry_idx, const found = self.findGetOrInsertIdx(key, hash, hint, ctx);
 
             if (found) {
-                return .{ .found = self.getValue(idx) };
+                return .{ .found = self.getValue(entry_idx) };
             }
 
-            if (self.metadata[idx].isEmpty()) {
+            if (self.metadata[entry_idx].isEmpty()) {
                 if (self.remaining_capacity == 0) {
                     @branchHint(.unlikely);
                     try self.grow(allocator, 1, ctx);
-                    idx = self.findInsertIdx(hash);
+                    entry_idx = self.findInsertIdx(hash);
                 }
 
                 self.remaining_capacity -= 1;
             }
 
-            self.insertKey(idx, key, hint);
-            return .{ .inserted = self.getValue(idx) };
+            self.insertKey(entry_idx, key, hint);
+            return .{ .inserted = self.getValue(entry_idx) };
         }
 
         pub const getOrInsertKey = if (is_zst_ctx)
@@ -605,13 +637,12 @@ pub fn HashMap(
             value: Value,
             ctx: Context,
         ) OOM!?Value {
-            const res = try self.getOrInsertKeyContext(allocator, key, value, ctx);
+            const res = try self.getOrInsertKeyContext(allocator, key, ctx);
             switch (res) {
                 .found => |ptr| return ptr.*,
                 .inserted => |ptr| {
-                    const old = ptr.*;
                     ptr.* = value;
-                    return old;
+                    return null;
                 },
             }
         }
@@ -651,24 +682,32 @@ pub fn HashMap(
             const entry_idx = self.getEntry(hash);
             var probe = Probe.start(entry_idx);
 
-            const idx = self.probeGetIdx(&probe, key, hint, ctx) orelse return null;
-            if (self.isLastInSequence(&probe, idx)) {
-                self.metadata[idx] = .empty;
+            const found_entry_idx = self.probeGetIdx(&probe, key, hint, ctx) orelse return null;
+            if (self.isLastInSequence(&probe, found_entry_idx)) {
+                self.metadata[found_entry_idx] = .empty;
                 self.remaining_capacity += 1;
-            } else self.metadata[idx] = .deleted;
+            } else self.metadata[found_entry_idx] = .deleted;
             self.len -= 1;
 
-            return self.getValue(idx).*;
+            return self.getValue(found_entry_idx).*;
         }
 
         pub const removeFetch = if (is_zst_ctx)
             zst_ctx.removeFetch
         else {};
 
-        fn isLastInSequence(self: *const Self, probe: *Probe, idx: usize) bool {
-            const vector_idx = idx - probe.pos;
-            const is_last_in_same_vector = (vector_idx < Metadata.block_size and self.metadata[idx + 1].isEmpty());
-            return is_last_in_same_vector or self.metadata[probe.next(self.entry_mask)].isEmpty();
+        fn isLastInSequence(self: *const Self, probe: *Probe, entry_idx: usize) bool {
+            const relative_idx = (entry_idx -% probe.pos) & self.entry_mask;
+
+            if (relative_idx < Metadata.block_size - 1) {
+                // Check, if there is a subsequent empty slot after the entry
+                // index in same block relative to the last probing position.
+                return self.metadata[entry_idx + 1].isEmpty();
+            } else {
+                // Otherwise, check if the next slot in the probing sequence is empty.
+                const next = probe.next(self.entry_mask);
+                return self.metadata[next].isEmpty();
+            }
         }
 
         fn grow(
@@ -696,10 +735,10 @@ pub fn HashMap(
             const entry_mask = new_entries - 1;
             const buffer = try Buffer.alloc(allocator, new_entries);
 
-            const old_table = self.*;
+            var old_table = self.*;
             self.* = .{
                 .len = old_table.len,
-                .remaining_capacity = applyLoadLimit(entry_mask),
+                .remaining_capacity = applyLoadLimit(entry_mask) - old_table.len,
                 .entry_mask = entry_mask,
                 .metadata = @ptrCast(&buffer.metadata),
             };
@@ -729,12 +768,13 @@ pub fn HashMap(
 
                 const key = self.getKey(i);
                 inner: while (true) {
-                    const hash: Hash = ctx.hash(key.*);
+                    // FIXME: broken? do we update the metadata slot?
+                    const hash, const hint = hashKey(key.*, ctx);
                     const entry_idx = self.getEntry(hash);
 
                     var probe = Probe.start(entry_idx);
                     const insert_idx = self.probeInsertIdx(&probe);
-                    self.metadata[i].insert(hash);
+                    self.metadata[i] = hint;
 
                     // If the new insert index is located in the same block as
                     // the old index, allow the entry to remain in its previous
@@ -764,22 +804,27 @@ pub fn HashMap(
         }
 
         fn batchInsert(self: *Self, other: *const Self, ctx: Context) void {
-            var vectors = other.getConstMetadataBlocks();
-            for (vectors[0 .. vectors.len - 1], 0..) |vector, v| {
-                const idx = v * Metadata.block_size;
+            const other_vectors = other.getConstMetadataBlocks();
+            for (other_vectors[0 .. other_vectors.len - 1], 0..) |vector, v| {
+                const block_idx = v * Metadata.block_size;
                 var used: Metadata.BitMask = @bitCast(Metadata.findUsed(vector));
-                while (nextBit(&used)) |i| {
-                    const key, const value = self.getKV(idx + i);
-                    const hash: Hash = ctx.hash(key.*);
+                while (nextBit(&used)) |idx| {
+                    const entry_idx = block_idx + idx;
+                    const key = other.getConstKey(entry_idx);
+                    const value = other.getConstValue(entry_idx);
+
+                    const hash, const hint = hashKey(key.*, ctx);
                     const insert_idx = self.findInsertIdx(hash);
-                    const new_key, const new_value = self.getKV(insert_idx);
+                    self.metadata[insert_idx] = hint;
+                    const new_key = self.getKey(insert_idx);
+                    const new_value = self.getValue(insert_idx);
                     new_key.* = key.*;
                     new_value.* = value.*;
                 }
             }
 
             // Ensure the final metadata block mirrors the first block.
-            vectors = self.getMetadataBlocks();
+            const vectors = self.getMetadataBlocks();
             vectors[vectors.len - 1] = vectors[0];
         }
 
@@ -818,8 +863,8 @@ pub fn HashMap(
                 const vector = self.getMetadataBlock(probe.pos);
                 if (Metadata.findHint(vector, hint)) |idx| {
                     const metadata_idx = probe.pos + idx;
-                    if (self.eqlKey(key, hint, metadata_idx, ctx)) |found_idx|
-                        return .{ found_idx, true };
+                    if (self.eqlKey(key, hint, metadata_idx, ctx)) |found_entry_idx|
+                        return .{ found_entry_idx, true };
                 }
 
                 if (insert_idx == null) {
@@ -861,8 +906,8 @@ pub fn HashMap(
                 const vector = self.getMetadataBlock(probe.pos);
                 if (Metadata.findHint(vector, hint)) |idx| {
                     const metadata_idx = probe.pos + idx;
-                    if (self.eqlKey(key, hint, metadata_idx, ctx)) |found_idx|
-                        return found_idx;
+                    if (self.eqlKey(key, hint, metadata_idx, ctx)) |found_entry_idx|
+                        return found_entry_idx;
                 }
 
                 // Upon encountering an empty slot within a probed block stop
@@ -891,7 +936,7 @@ pub fn HashMap(
             while (true) {
                 const vector = self.getMetadataBlock(probe.pos);
                 if (Metadata.findUnused(vector)) |idx|
-                    return idx;
+                    return (probe.pos + idx) & self.entry_mask;
                 _ = probe.next(self.entry_mask);
             }
         }
@@ -967,10 +1012,6 @@ pub fn HashMap(
             const ptr: [*]const Metadata.Block = @ptrCast(self.metadata);
             const len = (self.entry_mask + 1 + Metadata.block_size) / Metadata.block_size;
             return ptr[0..len];
-        }
-
-        fn getKV(self: *Self, entry_idx: usize) struct { *Key, *Value } {
-            return .{ self.getKey(entry_idx), self.getValue(entry_idx) };
         }
 
         fn getKey(self: *Self, entry_idx: usize) *Key {
@@ -1085,6 +1126,10 @@ pub fn HashMap(
                 count: usize,
             ) OOM!void {
                 return self.reserveContext(allocator, count, undefined);
+            }
+
+            pub fn rehash(self: *Self) void {
+                return self.rehashContext(undefined);
             }
 
             pub fn cloneContext(
@@ -1416,8 +1461,9 @@ const assert = std.debug.assert;
 
 const Alignment = std.mem.Alignment;
 const Allocator = std.mem.Allocator;
+const Wyhash = std.hash.Wyhash;
 
-const Map = HashMap(i32, i32, OneToOne, .default);
+const Map = ContextHashMap(i32, i32, OneToOne, .default);
 const OneToOne = struct {
     pub fn hash(_: OneToOne, key: i32) u64 {
         const unsigned: u64 = @bitCast(-@as(i64, key));
@@ -1469,14 +1515,14 @@ test "entries for capacity" {
     try tt.expectEqual(64, Map.entriesForCapacity(51));
     try tt.expectEqual(64, Map.entriesForCapacity(52));
 
-    const MapLoad88 = HashMap(i32, i32, struct {}, .{ .max_load_percentage = 88 });
+    const MapLoad88 = ContextHashMap(i32, i32, struct {}, .{ .max_load_percentage = 88 });
     try tt.expectEqual(8, MapLoad88.load_factor_nths);
     try tt.expectEqual(128, MapLoad88.entriesForCapacity(112));
     try tt.expectEqual(256, MapLoad88.entriesForCapacity(113));
     try tt.expectEqual(112, MapLoad88.applyLoadLimit(128 - 1));
 
     // max load 100% must still reserve at least one additional entry
-    const MapLoad100 = HashMap(i32, i32, struct {}, .{ .max_load_percentage = 100 });
+    const MapLoad100 = ContextHashMap(i32, i32, struct {}, .{ .max_load_percentage = 100 });
     try tt.expectEqual(100, MapLoad100.load_factor_nths);
     try tt.expectEqual(16, MapLoad100.entriesForCapacity(1));
     try tt.expectEqual(16, MapLoad100.entriesForCapacity(15));
@@ -1559,12 +1605,117 @@ test "tiny map" {
     try tt.expectEqual(Metadata.deleted, map.metadata[15]);
 }
 
-test "medium map" {
+test "rehash" {
     const allocator = tt.allocator;
-    var map: Map = try .initCapacity(tt.allocator, 200);
+
+    var map: HashMap(i32, i32, .default) = .empty;
     defer map.deinit(allocator);
 
-    try tt.expectEqual(256, map.getEntries());
-    try tt.expectEqual(224, map.getUsableCapacity());
-    try tt.expectEqual(224, map.remaining_capacity);
+    // Populate a map with all integers from 0 to 100, then remove
+    // every third number.
+    var i: i32 = 0;
+    while (i < 100) : (i += 1) {
+        try map.insert(allocator, i, i);
+    }
+
+    try tt.expectEqual(100, map.len);
+    try tt.expectEqual(12, map.remaining_capacity);
+
+    i = 0;
+    while (i < 100) : (i += 3) {
+        try tt.expectEqual(i, map.removeFetch(i));
+    }
+
+    try tt.expectEqual(66, map.len);
+    try tt.expectEqual(16, map.remaining_capacity);
+
+    i = 0;
+    while (i < 100) : (i += 1) {
+        try if (@mod(i, 3) == 0)
+            tt.expectEqual(null, map.get(i))
+        else
+            tt.expectEqual(i, map.get(i));
+    }
+}
+
+test "repeat remove" {
+    var map: HashMap(u64, void, .default) = .empty;
+    defer map.deinit(tt.allocator);
+
+    try map.reserve(tt.allocator, 4);
+    map.insertUnchecked(0, {});
+    map.insertUnchecked(1, {});
+    map.insertUnchecked(2, {});
+    map.insertUnchecked(3, {});
+
+    var i: usize = 0;
+    while (i < 10) : (i += 1) {
+        try tt.expect(map.remove(3));
+        map.insertUnchecked(3, {});
+    }
+
+    try tt.expect(map.get(0) != null);
+    try tt.expect(map.get(1) != null);
+    try tt.expect(map.get(2) != null);
+    try tt.expect(map.get(3) != null);
+}
+
+test "get or insert u32" {
+    const allocator = tt.allocator;
+
+    var map: HashMap(u32, u32, .default) = .empty;
+    defer map.deinit(tt.allocator);
+
+    // First round of inserts, before first resizing.
+    var i: u32 = 0;
+    while (i < 14) : (i += 1) {
+        const value = try map.getOrInsert(allocator, i, i);
+        try tt.expectEqual(null, value);
+    }
+
+    i = 0;
+    while (i < 14) : (i += 1) {
+        const value = map.get(i) orelse return error.NotFound;
+        try tt.expectEqual(i, value);
+    }
+
+    // Second round of inserts.
+    while (i < 100) : (i += 1) {
+        const value = try map.getOrInsert(allocator, i, i);
+        try tt.expectEqual(null, value);
+    }
+
+    i = 0;
+    while (i < 100) : (i += 1) {
+        const value = map.get(i) orelse return error.NotFound;
+        try tt.expectEqual(i, value);
+    }
+}
+
+test "get or insert sum" {
+    var map: HashMap(u32, u32, .default) = .empty;
+    defer map.deinit(tt.allocator);
+
+    var i: u32 = 0;
+    while (i < 10) : (i += 1) {
+        _ = try map.insert(tt.allocator, i * 2, 2);
+    }
+
+    i = 0;
+    while (i < 20) : (i += 1) {
+        _ = try map.getOrInsert(tt.allocator, i, 1);
+    }
+
+    i = 0;
+    var sum = i;
+    while (i < 20) : (i += 1) {
+        sum += map.get(i) orelse unreachable;
+    }
+
+    try tt.expectEqual(30, sum);
+}
+
+test "get or insert allocation failure" {
+    var map: StringHashMap(void, .default) = .empty;
+    try tt.expectError(error.OutOfMemory, map.getOrInsertKey(tt.failing_allocator, "hello"));
 }
