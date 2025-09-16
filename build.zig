@@ -7,7 +7,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
     });
 
-    const mod_tests = b.addTest(.{ .root_module = mod });
+    const mod_tests = b.addTest(.{ .root_module = mod, .use_llvm = true });
     const run_mod_tests = b.addRunArtifact(mod_tests);
 
     const test_step = b.step("test", "Run tests");

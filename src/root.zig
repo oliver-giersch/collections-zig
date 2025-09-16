@@ -6,8 +6,11 @@ const assert = std.debug.assert;
 const Log2Int = std.math.Log2Int(usize);
 
 const array_list = @import("array_list.zig");
+const hash_map = @import("hash_map.zig");
+
 comptime {
     _ = array_list;
+    _ = hash_map;
 }
 
 pub const BoundedArrayListAligned = array_list.BoundedArrayListAligned;

@@ -409,7 +409,9 @@ pub fn ContextHashMap(
             key: Key,
             ctx: Context,
         ) bool {
-            return self.findGetIdx(key, ctx) != null;
+            const hash, const hint = hashKey(key, ctx);
+            var probe = self.probeHash(hash);
+            return self.probeGetIdx(&probe, key, hint, ctx) != null;
         }
 
         pub const contains = if (is_zst_ctx)
@@ -423,9 +425,10 @@ pub fn ContextHashMap(
             ctx: Context,
         ) ?*const Value {
             const hash, const hint = hashKey(key, ctx);
-            const idx = self.findGetIdx(key, hash, hint, ctx) orelse
+            var probe = self.probeHash(hash);
+            const entry_idx = self.probeGetIdx(&probe, key, hint, ctx) orelse
                 return null;
-            return self.getConstValue(idx);
+            return self.getConstValue(entry_idx);
         }
 
         pub const getConstPtr = if (is_zst_ctx)
@@ -589,8 +592,9 @@ pub fn ContextHashMap(
             ctx: Context,
         ) OOM!GetOrInsert {
             const hash, const hint = hashKey(key, ctx);
-            var entry_idx, const found = self.findGetOrInsertIdx(key, hash, hint, ctx);
+            var probe = self.probeHash(hash);
 
+            var entry_idx, const found = self.probeGetOrInsertIdx(&probe, key, hint, ctx);
             if (found) {
                 return .{ .found = self.getValue(entry_idx) };
             }
@@ -679,17 +683,16 @@ pub fn ContextHashMap(
         /// removed value, if any.
         pub fn removeFetchContext(self: *Self, key: Key, ctx: Context) ?Value {
             const hash, const hint = hashKey(key, ctx);
-            const entry_idx = self.getEntry(hash);
-            var probe = Probe.start(entry_idx);
+            var probe = self.probeHash(hash);
 
-            const found_entry_idx = self.probeGetIdx(&probe, key, hint, ctx) orelse return null;
-            if (self.isLastInSequence(&probe, found_entry_idx)) {
-                self.metadata[found_entry_idx] = .empty;
+            const entry_idx = self.probeGetIdx(&probe, key, hint, ctx) orelse return null;
+            if (self.isLastInSequence(&probe, entry_idx)) {
                 self.remaining_capacity += 1;
-            } else self.metadata[found_entry_idx] = .deleted;
+                self.insertMetadata(entry_idx, .empty);
+            } else self.insertMetadata(entry_idx, .deleted);
             self.len -= 1;
 
-            return self.getValue(found_entry_idx).*;
+            return self.getValue(entry_idx).*;
         }
 
         pub const removeFetch = if (is_zst_ctx)
@@ -698,13 +701,13 @@ pub fn ContextHashMap(
 
         fn isLastInSequence(self: *const Self, probe: *Probe, entry_idx: usize) bool {
             const relative_idx = (entry_idx -% probe.pos) & self.entry_mask;
-
             if (relative_idx < Metadata.block_size - 1) {
                 // Check, if there is a subsequent empty slot after the entry
                 // index in same block relative to the last probing position.
                 return self.metadata[entry_idx + 1].isEmpty();
             } else {
-                // Otherwise, check if the next slot in the probing sequence is empty.
+                // Otherwise, check if the next slot in the probing sequence
+                // is empty.
                 const next = probe.next(self.entry_mask);
                 return self.metadata[next].isEmpty();
             }
@@ -768,25 +771,23 @@ pub fn ContextHashMap(
 
                 const key = self.getKey(i);
                 inner: while (true) {
-                    // FIXME: broken? do we update the metadata slot?
                     const hash, const hint = hashKey(key.*, ctx);
-                    const entry_idx = self.getEntry(hash);
+                    var probe = self.probeHash(hash);
 
-                    var probe = Probe.start(entry_idx);
-                    const insert_idx = self.probeInsertIdx(&probe);
+                    const entry_idx = self.probeInsertIdx(&probe);
                     self.metadata[i] = hint;
 
                     // If the new insert index is located in the same block as
                     // the old index, allow the entry to remain in its previous
                     // place.
-                    if (self.getVectorIdx(entry_idx, i) == self.getVectorIdx(probe.pos, insert_idx)) {
+                    if (self.getVectorIdx(entry_idx, i) == self.getVectorIdx(probe.pos, entry_idx)) {
                         @branchHint(.likely);
                         continue;
                     }
 
                     const value = self.getValue(i);
-                    const insert_key = self.getKey(insert_idx);
-                    const insert_value = self.getValue(insert_idx);
+                    const insert_key = self.getKey(entry_idx);
+                    const insert_value = self.getValue(entry_idx);
 
                     if (metadata == Metadata.empty) {
                         insert_key.* = key.*;
@@ -834,37 +835,31 @@ pub fn ContextHashMap(
             self.len += 1;
         }
 
-        fn insertMetadata(self: *Self, entry_idx: usize, hint: Metadata) void {
+        fn insertMetadata(self: *Self, entry_idx: usize, metadata: Metadata) void {
             const mirror_idx = self.getMirrorIdx(entry_idx);
             if (entry_idx != mirror_idx) {
                 @branchHint(.unlikely);
-                self.metadata[mirror_idx] = hint;
+                self.metadata[mirror_idx] = metadata;
             }
 
-            self.metadata[entry_idx] = hint;
+            self.metadata[entry_idx] = metadata;
         }
 
-        // TODO: insertion is more complicated, because basically every entry needs
-        // to be checked to make sure, that no duplicate exists at some later point
-        // in the probing sequence! just finding a tombstone isnt enough: the key could be stored later
-        // we need to look until we find an "untouched" (clean) empty element
-        fn findGetOrInsertIdx(
+        fn probeGetOrInsertIdx(
             self: *const Self,
+            probe: *Probe,
             key: Key,
-            hash: Hash,
             hint: Metadata,
             ctx: Context,
         ) struct { usize, bool } {
-            const entry_idx = self.getEntry(hash);
-            var probe = Probe.start(entry_idx);
             var insert_idx: ?usize = null;
 
             while (true) {
                 const vector = self.getMetadataBlock(probe.pos);
                 if (Metadata.findHint(vector, hint)) |idx| {
                     const metadata_idx = probe.pos + idx;
-                    if (self.eqlKey(key, hint, metadata_idx, ctx)) |found_entry_idx|
-                        return .{ found_entry_idx, true };
+                    if (self.eqlKey(key, hint, metadata_idx, ctx)) |entry_idx|
+                        return .{ entry_idx, true };
                 }
 
                 if (insert_idx == null) {
@@ -879,18 +874,6 @@ pub fn ContextHashMap(
 
                 _ = probe.next(self.entry_mask);
             }
-        }
-
-        fn findGetIdx(
-            self: *const Self,
-            key: Key,
-            hash: Hash,
-            hint: Metadata,
-            ctx: Context,
-        ) ?usize {
-            const entry_idx = self.getEntry(hash);
-            var probe = Probe.start(entry_idx);
-            return self.probeGetIdx(&probe, key, hint, ctx);
         }
 
         fn probeGetIdx(
@@ -927,8 +910,7 @@ pub fn ContextHashMap(
             self: *const Self,
             hash: Hash,
         ) usize {
-            const entry_idx = self.getEntry(hash);
-            var probe = Probe.start(entry_idx);
+            var probe = self.probeHash(hash);
             return self.probeInsertIdx(&probe);
         }
 
@@ -939,6 +921,11 @@ pub fn ContextHashMap(
                     return (probe.pos + idx) & self.entry_mask;
                 _ = probe.next(self.entry_mask);
             }
+        }
+
+        fn probeHash(self: *const Self, hash: Hash) Probe {
+            const entry_idx = self.getEntry(hash);
+            return .start(entry_idx);
         }
 
         /// Checks the hash hint for the given metadata slot index (may be a
@@ -1476,7 +1463,7 @@ const OneToOne = struct {
 };
 
 test "nths" {
-    try tt.expectEqual(1, nths(100));
+    try tt.expectEqual(100, nths(100));
     try tt.expectEqual(100, nths(99));
     try tt.expectEqual(50, nths(98));
     try tt.expectEqual(33, nths(97));
@@ -1545,7 +1532,7 @@ test "empty map" {
 test "empty map get" {
     var map: Map = .empty;
     const value = map.get(1);
-    try tt.expectEqual(15, map.getEntry(OneToOne.hash(.{}, 1)));
+    try tt.expectEqual(0, map.getEntry(OneToOne.hash(.{}, 1)));
     try tt.expectEqual(null, value);
 }
 
@@ -1599,10 +1586,10 @@ test "tiny map" {
     try tt.expectEqual(100, map.removeFetch(1));
 
     // Check for tombstones
-    try tt.expectEqual(13, map.remaining_capacity);
+    try tt.expectEqual(14, map.remaining_capacity);
     try tt.expectEqual(0, map.len);
     try tt.expectEqual(Metadata.empty, map.metadata[0]);
-    try tt.expectEqual(Metadata.deleted, map.metadata[15]);
+    try tt.expectEqual(Metadata.empty, map.metadata[15]);
 }
 
 test "rehash" {
@@ -1624,6 +1611,15 @@ test "rehash" {
     i = 0;
     while (i < 100) : (i += 3) {
         try tt.expectEqual(i, map.removeFetch(i));
+        try tt.expectEqual(null, map.get(i));
+
+        var j: i32 = 0;
+        while (j < 100) : (j += 1) {
+            if (@mod(j, 3) == 0 and j <= i)
+                try tt.expectEqual(null, map.get(j))
+            else
+                try tt.expectEqual(j, map.get(j));
+        }
     }
 
     try tt.expectEqual(66, map.len);
@@ -1631,10 +1627,10 @@ test "rehash" {
 
     i = 0;
     while (i < 100) : (i += 1) {
-        try if (@mod(i, 3) == 0)
-            tt.expectEqual(null, map.get(i))
+        if (@mod(i, 3) == 0)
+            try tt.expectEqual(null, map.get(i))
         else
-            tt.expectEqual(i, map.get(i));
+            try tt.expectEqual(i, map.get(i));
     }
 }
 
