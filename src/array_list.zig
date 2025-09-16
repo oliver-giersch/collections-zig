@@ -29,6 +29,9 @@ pub fn ArrayListAligned(comptime T: type, comptime A: ?Alignment) type {
 
         pub fn init(allocator: Allocator, min_capacity: usize) OOM!Self {
             const capacity = try capacityFor(min_capacity);
+            if (capacity == 0)
+                return .empty;
+
             const items = try allocator.alignedAlloc(Item, A, capacity);
             return .{ .bounded = .init(items) };
         }
@@ -81,8 +84,19 @@ pub fn ArrayListAligned(comptime T: type, comptime A: ?Alignment) type {
                 // No overflow possible, since capacity is less than `max_array_list_capacity`
                 // and the bounded array length is as well by definition.
                 const new_capacity = try capacityFor(self.bounded.items.len + capacity);
-                return self.growTo(allocator, new_capacity);
+                return self.resizeTo(allocator, new_capacity);
             };
+        }
+
+        pub fn shrink(self: *Self, allocator: Allocator) OOM!void {
+            if (self.bounded.capacity == 0)
+                return;
+
+            const new_capacity = capacityFor(self.bounded.items.len) catch unreachable;
+            if (self.bounded.capacity == new_capacity)
+                return;
+
+            return self.resizeTo(allocator, new_capacity);
         }
 
         pub fn ensureCapacity(self: *Self, allocator: Allocator, capacity: usize) OOM!void {
@@ -174,10 +188,10 @@ pub fn ArrayListAligned(comptime T: type, comptime A: ?Alignment) type {
         fn grow(self: *Self, allocator: Allocator) OOM!void {
             const capacity = self.bounded.capacity;
             const new_capacity = try capacityFor(capacity + 1);
-            return self.growTo(allocator, new_capacity);
+            return self.resizeTo(allocator, new_capacity);
         }
 
-        fn growTo(self: *Self, allocator: Allocator, new_capacity: usize) OOM!void {
+        fn resizeTo(self: *Self, allocator: Allocator, new_capacity: usize) OOM!void {
             assert(collections.isPow2(new_capacity));
             const items = try allocator.realloc(self.bounded.items, new_capacity);
             self.bounded.items.ptr = items.ptr;
@@ -192,6 +206,8 @@ pub fn ArrayListAligned(comptime T: type, comptime A: ?Alignment) type {
 }
 
 fn capacityFor(new_capacity: usize) collections.OOM!usize {
+    if (new_capacity == 0)
+        return 0;
     if (new_capacity <= min_array_list_capacity)
         return min_array_list_capacity;
 
@@ -212,13 +228,18 @@ test "deinit" {
 }
 
 test "reserve" {
+    const allocator = tt.allocator;
+
     var list: ArrayList(i32) = .empty;
     defer list.deinit(tt.allocator);
 
-    try list.reserve(tt.allocator, 4);
+    try list.reserve(allocator, 0);
+    try tt.expectEqual(0, list.bounded.capacity);
+
+    try list.reserve(allocator, 4);
     try tt.expectEqual(8, list.bounded.capacity);
     list.bounded.pushSlice(&.{ 1, 2, 3, 4, 5, 6, 7, 8 }) catch unreachable;
-    try list.reserve(tt.allocator, 64);
+    try list.reserve(allocator, 64);
     try tt.expectEqual(128, list.bounded.capacity);
     try tt.expectEqualSlices(i32, &.{ 1, 2, 3, 4, 5, 6, 7, 8 }, list.bounded.items);
 }
@@ -251,6 +272,32 @@ test "append slice" {
     try tt.expectEqualSlices(i32, &.{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 }, list.bounded.items);
     try tt.expectEqual(16, list.bounded.items.len);
     try tt.expectEqual(0, list.remainingCapacity());
+}
+
+test "append slice as array" {
+    var list: ArrayList(i32) = .empty;
+    defer list.deinit(tt.allocator);
+
+    const slice = try list.appendSlice(tt.allocator, 4);
+    const array1: *[4]i32 = slice[0..4];
+    @memcpy(array1, &[_]i32{ 1, 2, 3, 4 });
+    try tt.expectEqualSlices(i32, &.{ 1, 2, 3, 4 }, list.bounded.items);
+
+    const array2: *[4]i32 = (try list.appendSlice(tt.allocator, 4))[0..4];
+    @memcpy(array2, &[_]i32{ 5, 6, 7, 8 });
+    try tt.expectEqualSlices(i32, &.{ 1, 2, 3, 4, 5, 6, 7, 8 }, list.bounded.items);
+}
+
+test "append slice at as array" {
+    var list: ArrayList(i32) = .empty;
+    defer list.deinit(tt.allocator);
+
+    var array: *[4]i32 = (try list.appendSlice(tt.allocator, 4))[0..4];
+    @memcpy(array, &[_]i32{ 5, 6, 7, 8 });
+    array = (try list.appendSliceAt(tt.allocator, 4, 0))[0..4];
+    @memcpy(array, &[_]i32{ 1, 2, 3, 4 });
+
+    try tt.expectEqualSlices(i32, &.{ 1, 2, 3, 4, 5, 6, 7, 8 }, list.bounded.items);
 }
 
 pub fn BoundedArrayList(comptime T: type) type {
