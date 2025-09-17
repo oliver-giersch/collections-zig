@@ -236,7 +236,7 @@ pub fn ContextHashMap(
             /// entries.
             fn free(self: *Buffer, allocator: Allocator, entries: usize) void {
                 const n = Buffer.calculateSize(entries);
-                const ptr: [*]align(buffer_alignment) u8 = @ptrCast(self);
+                const ptr: [*]align(buffer_alignment) u8 = @ptrCast(@alignCast(self));
                 allocator.free(ptr[0..n]);
             }
 
