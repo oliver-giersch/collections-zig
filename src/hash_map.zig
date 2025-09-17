@@ -251,7 +251,7 @@ pub fn ContextHashMap(
         const Probe = switch (options.probing_strategy) {
             .linear => LinearProbe,
             .triangular => TriangularProbe,
-            .cache_line => CacheLineProbe,
+            .cache_line => CacheLineProbe(cache_line.len),
         };
 
         const load_factor_nths = nths(options.max_load_percentage);
@@ -928,7 +928,7 @@ pub fn ContextHashMap(
             while (true) {
                 const block = self.getMetadataBlock(probe.pos); // IDEA: return a bool indicating if we need to wrap?
                 if (Metadata.findUnused(block)) |relative_idx| {
-                    const entry_idx = metadataIdx(probe.pos, relative_idx) & self.entry_mask;
+                    const entry_idx = metadataIdx(probe, relative_idx) & self.entry_mask;
                     return entry_idx;
                 }
                 _ = probe.next(self.entry_mask);
@@ -1407,31 +1407,32 @@ const TriangularProbe = struct {
     }
 };
 
-const CacheLineProbe = struct {
-    const cache_line = 64;
-    const cache_line_mask = ~@as(usize, 64 - 1);
+fn CacheLineProbe(comptime len: usize) type {
+    return struct {
+        const Self = @This();
 
-    pos: usize,
-    origin: usize,
+        pos: usize,
+        origin: usize,
 
-    fn start(entry_idx: usize) CacheLineProbe {
-        return .{ .pos = entry_idx, .origin = entry_idx };
-    }
-
-    fn next(self: *CacheLineProbe, entry_mask: usize) usize {
-        const tentative_next = self.pos + Metadata.block_size;
-        if (self.origin != tentative_next) {
-            @branchHint(.likely);
-            const cache_line_start = self.origin & cache_line_mask;
-            self.pos = (cache_line_start + (tentative_next & (cache_line - 1))) & entry_mask;
-            return self.pos;
+        fn start(entry_idx: usize) Self {
+            return .{ .pos = entry_idx, .origin = entry_idx };
         }
 
-        self.pos = (self.origin + cache_line) & entry_mask;
-        self.origin = self.pos;
-        return self.pos;
-    }
-};
+        fn next(self: *Self, entry_mask: usize) usize {
+            const tentative_next = self.pos + Metadata.block_size;
+            if (self.origin != tentative_next) {
+                @branchHint(.likely);
+                const cache_line_start = self.origin & cache_line.mask;
+                self.pos = (cache_line_start + (tentative_next & (len - 1))) & entry_mask;
+                return self.pos;
+            }
+
+            self.pos = (self.origin + len) & entry_mask;
+            self.origin = self.pos;
+            return self.pos;
+        }
+    };
+}
 
 const cache_line = struct {
     const len: usize = std.atomic.cache_line;
@@ -1440,7 +1441,7 @@ const cache_line = struct {
 
 test "cache line probe" {
     var entry_mask: usize = 256 - 1;
-    var probe = CacheLineProbe.start(52);
+    var probe = CacheLineProbe(64).start(52);
     try tt.expectEqual(4, probe.next(entry_mask));
     try tt.expectEqual(20, probe.next(entry_mask));
     try tt.expectEqual(36, probe.next(entry_mask));
@@ -1464,7 +1465,7 @@ test "cache line probe" {
     try tt.expectEqual(4, probe.next(entry_mask));
 
     entry_mask = 32 - 1;
-    probe = CacheLineProbe.start(28);
+    probe = CacheLineProbe(64).start(28);
     try tt.expectEqual(12, probe.next(entry_mask));
     try tt.expectEqual(28, probe.next(entry_mask));
     try tt.expectEqual(12, probe.next(entry_mask));
