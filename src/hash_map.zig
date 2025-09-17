@@ -865,20 +865,20 @@ pub fn ContextHashMap(
             var insert_idx: ?usize = null;
 
             while (true) {
-                const vector = self.getMetadataBlock(probe.pos);
-                if (Metadata.findHint(vector, hint)) |idx| {
-                    const metadata_idx = probe.pos + idx;
+                const block = self.getMetadataBlock(probe.pos);
+                if (Metadata.findHint(block, hint)) |relative_idx| {
+                    const metadata_idx = metadataIdx(probe, relative_idx);
                     if (self.eqlKey(key, hint, metadata_idx, ctx)) |entry_idx|
                         return .{ entry_idx, true };
                 }
 
                 if (insert_idx == null) {
-                    if (Metadata.findUnused(vector)) |idx|
-                        insert_idx = (probe.pos + idx) & self.entry_mask;
+                    if (Metadata.findUnused(block)) |relative_idx|
+                        insert_idx = metadataIdx(probe, relative_idx) & self.entry_mask;
                 }
 
                 if (insert_idx) |idx| {
-                    if (Metadata.findEmpty(vector)) |_|
+                    if (Metadata.findEmpty(block)) |_|
                         return .{ idx, false };
                 }
 
@@ -896,16 +896,16 @@ pub fn ContextHashMap(
             while (true) {
                 // Search for a metadata block containing the correct hash hint
                 // for the queried key in accordance with the probing sequence.
-                const vector = self.getMetadataBlock(probe.pos);
-                if (Metadata.findHint(vector, hint)) |idx| {
-                    const metadata_idx = probe.pos + idx;
-                    if (self.eqlKey(key, hint, metadata_idx, ctx)) |found_entry_idx|
-                        return found_entry_idx;
+                const block = self.getMetadataBlock(probe.pos);
+                if (Metadata.findHint(block, hint)) |relative_idx| {
+                    const metadata_idx = metadataIdx(probe, relative_idx);
+                    if (self.eqlKey(key, hint, metadata_idx, ctx)) |entry_idx|
+                        return entry_idx;
                 }
 
                 // Upon encountering an empty slot within a probed block stop
                 // searchin further.
-                if (Metadata.findEmpty(vector)) |_|
+                if (Metadata.findEmpty(block)) |_|
                     return null;
 
                 // Try the next vector in the probe sequence.
@@ -926,9 +926,9 @@ pub fn ContextHashMap(
 
         fn probeInsertIdx(self: *const Self, probe: *Probe) usize {
             while (true) {
-                const vector = self.getMetadataBlock(probe.pos);
-                if (Metadata.findUnused(vector)) |idx| {
-                    const entry_idx = (probe.pos + idx) & self.entry_mask;
+                const block = self.getMetadataBlock(probe.pos); // IDEA: return a bool indicating if we need to wrap?
+                if (Metadata.findUnused(block)) |relative_idx| {
+                    const entry_idx = metadataIdx(probe.pos, relative_idx) & self.entry_mask;
                     return entry_idx;
                 }
                 _ = probe.next(self.entry_mask);
@@ -994,15 +994,17 @@ pub fn ContextHashMap(
             if (comptime options.probing_strategy == .cache_line) {
                 // Check, if the metadata block would cross a cache-line
                 // boundary. If yes, wrap around at the end of the cache-line.
-                const end = (entry_idx + CacheLineProbe.cache_line) & CacheLineProbe.cache_line_mask;
+                const end = (entry_idx + cache_line.len) & cache_line.mask;
                 const len = end - entry_idx;
                 if (len < Metadata.block_size) {
-                    const remaining = Metadata.block_size - len;
-                    const start = entry_idx & CacheLineProbe.cache_line_mask;
+                    // Calculate the number of metadata slots that must be read
+                    // from the start of the cache.line.
+                    const remaining_len = Metadata.block_size - len;
+                    const start = entry_idx & cache_line.mask;
 
                     var block: [Metadata.block_size]Metadata = undefined;
                     @memcpy(block[0..len], self.metadata[entry_idx..][0..len]);
-                    @memcpy(block[len..], self.metadata[start..][0..remaining]);
+                    @memcpy(block[len..], self.metadata[start..][0..remaining_len]);
                     return @bitCast(block);
                 }
             }
@@ -1069,7 +1071,10 @@ pub fn ContextHashMap(
         }
 
         fn getRelativeIdx(self: *const Self, base_idx: usize, entry_idx: usize) usize {
-            return (entry_idx -% base_idx) & self.entry_mask;
+            return if (comptime options.probing_strategy == .cache_line)
+                (entry_idx -% base_idx) & (cache_line.len - 1) & self.entry_mask
+            else
+                (entry_idx -% base_idx) & self.entry_mask;
         }
 
         fn getMirrorIdx(self: *const Self, entry_idx: usize) usize {
@@ -1096,6 +1101,13 @@ pub fn ContextHashMap(
                 const kvs = buffer.header.kvs[0..entries];
                 return kvs.ptr <= ptr and ptr <= kvs.ptr + kvs.len;
             }
+        }
+
+        fn metadataIdx(probe: *const Probe, relative_idx: usize) usize {
+            return if (comptime options.probing_strategy == .cache_line)
+                (probe.pos & cache_line.mask) + ((probe.pos + relative_idx) & (cache_line.len - 1))
+            else
+                probe.pos + relative_idx;
         }
 
         fn hashKey(key: Key, ctx: Context) struct { Hash, Metadata } {
@@ -1419,6 +1431,11 @@ const CacheLineProbe = struct {
         self.origin = self.pos;
         return self.pos;
     }
+};
+
+const cache_line = struct {
+    const len: usize = std.atomic.cache_line;
+    const mask: usize = ~@as(usize, 64 - 1);
 };
 
 test "cache line probe" {
