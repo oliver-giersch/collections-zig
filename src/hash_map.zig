@@ -146,7 +146,7 @@ pub fn ContextHashMap(
         const Buffer = extern struct {
             /// The alignment of the metadata slot array.
             const metadata_alignment = if (options.probing_strategy == .cache_line)
-                @max(CacheLineProbe.cache_line, @alignOf(Metadata.Block))
+                @max(cache_line.len, @alignOf(Metadata.Block))
             else
                 @alignOf(Metadata.Block);
 
@@ -251,7 +251,7 @@ pub fn ContextHashMap(
         const Probe = switch (options.probing_strategy) {
             .linear => LinearProbe,
             .triangular => TriangularProbe,
-            .cache_line => CacheLineProbe(cache_line.len),
+            .cache_line => CacheLineProbe,
         };
 
         const load_factor_nths = nths(options.max_load_percentage);
@@ -1407,32 +1407,28 @@ const TriangularProbe = struct {
     }
 };
 
-fn CacheLineProbe(comptime len: usize) type {
-    return struct {
-        const Self = @This();
+const CacheLineProbe = struct {
+    pos: usize,
+    origin: usize,
 
-        pos: usize,
-        origin: usize,
+    fn start(entry_idx: usize) CacheLineProbe {
+        return .{ .pos = entry_idx, .origin = entry_idx };
+    }
 
-        fn start(entry_idx: usize) Self {
-            return .{ .pos = entry_idx, .origin = entry_idx };
-        }
-
-        fn next(self: *Self, entry_mask: usize) usize {
-            const tentative_next = self.pos + Metadata.block_size;
-            if (self.origin != tentative_next) {
-                @branchHint(.likely);
-                const cache_line_start = self.origin & cache_line.mask;
-                self.pos = (cache_line_start + (tentative_next & (len - 1))) & entry_mask;
-                return self.pos;
-            }
-
-            self.pos = (self.origin + len) & entry_mask;
-            self.origin = self.pos;
+    fn next(self: *CacheLineProbe, entry_mask: usize) usize {
+        const tentative_next = self.pos + Metadata.block_size;
+        if (self.origin != tentative_next) {
+            @branchHint(.likely);
+            const cache_line_start = self.origin & cache_line.mask;
+            self.pos = (cache_line_start + (tentative_next & (cache_line.len - 1))) & entry_mask;
             return self.pos;
         }
-    };
-}
+
+        self.pos = (self.origin + cache_line.len) & entry_mask;
+        self.origin = self.pos;
+        return self.pos;
+    }
+};
 
 const cache_line = struct {
     const len: usize = std.atomic.cache_line;
@@ -1440,6 +1436,7 @@ const cache_line = struct {
 };
 
 test "cache line probe" {
+    // FIXME: this test is broken if cache line != 64
     var entry_mask: usize = 256 - 1;
     var probe = CacheLineProbe(64).start(52);
     try tt.expectEqual(4, probe.next(entry_mask));
@@ -1746,6 +1743,25 @@ test "tiny map" {
     try tt.expectEqual(0, map.len);
     try tt.expectEqual(Metadata.empty, map.metadata[0]);
     try tt.expectEqual(Metadata.empty, map.metadata[15]);
+}
+
+test "insert cache line probing" {
+    const allocator = tt.allocator;
+
+    var map: HashMap(i32, void, .{ .probing_strategy = .cache_line }) = .empty;
+    defer map.deinit(allocator);
+
+    var i: i32 = 0;
+    while (i < 100) : (i += 1) {
+        const is: usize = @intCast(i);
+        try tt.expectEqual(is, map.len);
+        try tt.expectEqual(map.getUsableCapacity() - is, map.remaining_capacity);
+        try map.insert(allocator, i, {});
+    }
+
+    try tt.expectEqual(112, map.getUsableCapacity());
+    try tt.expectEqual(100, map.len);
+    try tt.expectEqual(12, map.remaining_capacity);
 }
 
 test "rehash" {
