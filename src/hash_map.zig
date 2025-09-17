@@ -39,8 +39,16 @@ pub const Options = struct {
         multi_array,
     };
 
+    pub const ProbingStrategy = enum {
+        linear,
+        triangular,
+        cache_line,
+    };
+
     /// The memory layout for the key-value pairs.
     layout: Options.Layout = .auto,
+    /// The probing strategy used for resolving hash conflicts.
+    probing_strategy: ProbingStrategy = .triangular,
     /// The maximum load percentage before the map is resized.
     max_load_percentage: u8 = 88, // round-up from 87.5, i.e. 1/8th
 };
@@ -136,11 +144,19 @@ pub fn ContextHashMap(
         /// to each other of spread out across two separate variable length
         /// arrays.
         const Buffer = extern struct {
-            const alignment = Alignment.fromByteUnits(buffer_alignment);
-            const buffer_alignment = @max(@alignOf(Buffer), @alignOf(Metadata), if (!multi_array)
-                @alignOf(KeyValue)
+            /// The alignment of the metadata slot array.
+            const metadata_alignment = if (options.probing_strategy == .cache_line)
+                @max(CacheLineProbe.cache_line, @alignOf(Metadata.Block))
             else
-                @max(key_align, value_align));
+                @alignOf(Metadata.Block);
+
+            /// The alignment of the buffer struct.
+            const buffer_alignment = @max(@alignOf(Buffer), metadata_alignment, if (multi_array)
+                @max(key_align, value_align)
+            else
+                @alignOf(KeyValue));
+
+            const alignment = Alignment.fromByteUnits(buffer_alignment);
 
             /// The header contains pointers to the variable length array(s)
             /// containing the key-value pairs.
@@ -232,20 +248,10 @@ pub fn ContextHashMap(
         };
 
         /// An abstraction for the implemented probing sequence.
-        const Probe = struct {
-            pos: usize,
-            stride: usize = Metadata.block_size,
-
-            fn start(entry_idx: usize) Probe {
-                return .{ .pos = entry_idx, .stride = Metadata.block_size };
-            }
-
-            fn next(self: *Probe, bucket_mask: usize) usize {
-                const pos = (self.pos + self.stride) & bucket_mask;
-                self.pos = pos;
-                self.stride += Metadata.block_size;
-                return pos;
-            }
+        const Probe = switch (options.probing_strategy) {
+            .linear => LinearProbe,
+            .triangular => TriangularProbe,
+            .cache_line => CacheLineProbe,
         };
 
         const load_factor_nths = nths(options.max_load_percentage);
@@ -798,12 +804,13 @@ pub fn ContextHashMap(
                     } else {
                         assert(metadata == Metadata.deleted);
                         mem.swap(Key, key, insert_key);
-                        mem.swap(Value, self.getValue(i), insert_value);
+                        mem.swap(Value, value, insert_value);
                         continue :inner;
                     }
                 }
             }
 
+            // Ensure the final metadata block mirrors the first block.
             vectors[vectors.len - 1] = vectors[0];
         }
 
@@ -984,6 +991,22 @@ pub fn ContextHashMap(
         /// "empty" buffer, since the entry mask 0 will ensure that all hashes
         /// map to index 0.
         fn getMetadataBlock(self: *const Self, entry_idx: usize) Metadata.Block {
+            if (comptime options.probing_strategy == .cache_line) {
+                // Check, if the metadata block would cross a cache-line
+                // boundary. If yes, wrap around at the end of the cache-line.
+                const end = (entry_idx + CacheLineProbe.cache_line) & CacheLineProbe.cache_line_mask;
+                const len = end - entry_idx;
+                if (len < Metadata.block_size) {
+                    const remaining = Metadata.block_size - len;
+                    const start = entry_idx & CacheLineProbe.cache_line_mask;
+
+                    var block: [Metadata.block_size]Metadata = undefined;
+                    @memcpy(block[0..len], self.metadata[entry_idx..][0..len]);
+                    @memcpy(block[len..], self.metadata[start..][0..remaining]);
+                    return @bitCast(block);
+                }
+            }
+
             return @bitCast(self.metadata[entry_idx..][0..Metadata.block_size].*);
         }
 
@@ -1342,6 +1365,94 @@ const Metadata = packed struct(u8) {
         return @truncate(hash >> shift);
     }
 };
+
+const LinearProbe = struct {
+    pos: usize,
+
+    fn start(entry_idx: usize) LinearProbe {
+        return .{ .pos = entry_idx };
+    }
+
+    fn next(self: *LinearProbe, entry_mask: usize) usize {
+        self.pos = (self.pos + Metadata.block_size) & entry_mask;
+        return self.pos;
+    }
+};
+
+const TriangularProbe = struct {
+    pos: usize,
+    stride: usize = Metadata.block_size,
+
+    fn start(entry_idx: usize) TriangularProbe {
+        return .{ .pos = entry_idx, .stride = Metadata.block_size };
+    }
+
+    fn next(self: *TriangularProbe, entry_mask: usize) usize {
+        const pos = (self.pos + self.stride) & entry_mask;
+        self.pos = pos;
+        self.stride += Metadata.block_size;
+        return pos;
+    }
+};
+
+const CacheLineProbe = struct {
+    const cache_line = 64;
+    const cache_line_mask = ~@as(usize, 64 - 1);
+
+    pos: usize,
+    origin: usize,
+
+    fn start(entry_idx: usize) CacheLineProbe {
+        return .{ .pos = entry_idx, .origin = entry_idx };
+    }
+
+    fn next(self: *CacheLineProbe, entry_mask: usize) usize {
+        const tentative_next = self.pos + Metadata.block_size;
+        if (self.origin != tentative_next) {
+            @branchHint(.likely);
+            const cache_line_start = self.origin & cache_line_mask;
+            self.pos = (cache_line_start + (tentative_next & (cache_line - 1))) & entry_mask;
+            return self.pos;
+        }
+
+        self.pos = (self.origin + cache_line) & entry_mask;
+        self.origin = self.pos;
+        return self.pos;
+    }
+};
+
+test "cache line probe" {
+    var entry_mask: usize = 256 - 1;
+    var probe = CacheLineProbe.start(52);
+    try tt.expectEqual(4, probe.next(entry_mask));
+    try tt.expectEqual(20, probe.next(entry_mask));
+    try tt.expectEqual(36, probe.next(entry_mask));
+    // jump to 2nd cacheline
+    try tt.expectEqual(116, probe.next(entry_mask));
+    try tt.expectEqual(68, probe.next(entry_mask));
+    try tt.expectEqual(84, probe.next(entry_mask));
+    try tt.expectEqual(100, probe.next(entry_mask));
+    // jump to 3rd cache line
+    try tt.expectEqual(180, probe.next(entry_mask));
+    try tt.expectEqual(132, probe.next(entry_mask));
+    try tt.expectEqual(148, probe.next(entry_mask));
+    try tt.expectEqual(164, probe.next(entry_mask));
+    // jump to 4th cache line
+    try tt.expectEqual(244, probe.next(entry_mask));
+    try tt.expectEqual(196, probe.next(entry_mask));
+    try tt.expectEqual(212, probe.next(entry_mask));
+    try tt.expectEqual(228, probe.next(entry_mask));
+    // jump back to 1st cache line
+    try tt.expectEqual(52, probe.next(entry_mask));
+    try tt.expectEqual(4, probe.next(entry_mask));
+
+    entry_mask = 32 - 1;
+    probe = CacheLineProbe.start(28);
+    try tt.expectEqual(12, probe.next(entry_mask));
+    try tt.expectEqual(28, probe.next(entry_mask));
+    try tt.expectEqual(12, probe.next(entry_mask));
+    try tt.expectEqual(28, probe.next(entry_mask));
+}
 
 test "metadata find hint" {
     const hash1: Metadata = .{ .hash_hint = 0b1101101, .free = false };
