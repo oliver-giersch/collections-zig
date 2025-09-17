@@ -700,7 +700,8 @@ pub fn ContextHashMap(
         else {};
 
         fn isLastInSequence(self: *const Self, probe: *Probe, entry_idx: usize) bool {
-            const relative_idx = (entry_idx -% probe.pos) & self.entry_mask;
+            const relative_idx = self.getRelativeIdx(probe.pos, entry_idx);
+            assert(relative_idx < Metadata.block_size);
             if (relative_idx < Metadata.block_size - 1) {
                 // Check, if there is a subsequent empty slot after the entry
                 // index in same block relative to the last probing position.
@@ -765,8 +766,7 @@ pub fn ContextHashMap(
                 vector.* = Metadata.prepareRehash(vector.*);
 
             outer: for (0..self.getEntries()) |i| {
-                const metadata = self.metadata[i];
-                if (metadata != Metadata.deleted)
+                if (self.metadata[i] != Metadata.deleted)
                     continue;
 
                 const key = self.getKey(i);
@@ -774,26 +774,29 @@ pub fn ContextHashMap(
                     const hash, const hint = hashKey(key.*, ctx);
                     var probe = self.probeHash(hash);
 
-                    const entry_idx = self.probeInsertIdx(&probe);
-                    self.metadata[i] = hint;
-
                     // If the new insert index is located in the same block as
                     // the old index, allow the entry to remain in its previous
                     // place.
-                    if (self.getVectorIdx(entry_idx, i) == self.getVectorIdx(probe.pos, entry_idx)) {
+                    const entry_idx = self.probeInsertIdx(&probe);
+                    if (self.getBlockIdx(probe.pos, i) == self.getBlockIdx(probe.pos, entry_idx)) {
                         @branchHint(.likely);
-                        continue;
+                        self.metadata[i] = hint;
+                        continue :outer;
                     }
 
                     const value = self.getValue(i);
                     const insert_key = self.getKey(entry_idx);
                     const insert_value = self.getValue(entry_idx);
 
+                    const metadata = self.metadata[entry_idx];
+                    self.metadata[entry_idx] = hint;
+
                     if (metadata == Metadata.empty) {
                         insert_key.* = key.*;
                         insert_value.* = value.*;
                         continue :outer;
                     } else {
+                        assert(metadata == Metadata.deleted);
                         mem.swap(Key, key, insert_key);
                         mem.swap(Value, self.getValue(i), insert_value);
                         continue :inner;
@@ -917,8 +920,10 @@ pub fn ContextHashMap(
         fn probeInsertIdx(self: *const Self, probe: *Probe) usize {
             while (true) {
                 const vector = self.getMetadataBlock(probe.pos);
-                if (Metadata.findUnused(vector)) |idx|
-                    return (probe.pos + idx) & self.entry_mask;
+                if (Metadata.findUnused(vector)) |idx| {
+                    const entry_idx = (probe.pos + idx) & self.entry_mask;
+                    return entry_idx;
+                }
                 _ = probe.next(self.entry_mask);
             }
         }
@@ -1036,8 +1041,12 @@ pub fn ContextHashMap(
             return @truncate(hash & self.entry_mask);
         }
 
-        fn getVectorIdx(self: *const Self, base_idx: usize, idx: usize) usize {
-            return ((idx -% base_idx) & self.entry_mask) / Metadata.block_size;
+        fn getBlockIdx(self: *const Self, base_idx: usize, entry_idx: usize) usize {
+            return self.getRelativeIdx(base_idx, entry_idx) / Metadata.block_size;
+        }
+
+        fn getRelativeIdx(self: *const Self, base_idx: usize, entry_idx: usize) usize {
+            return (entry_idx -% base_idx) & self.entry_mask;
         }
 
         fn getMirrorIdx(self: *const Self, entry_idx: usize) usize {
@@ -1282,9 +1291,8 @@ const Metadata = packed struct(u8) {
     /// Returns the index of the first slot within the block that is either
     /// empty or deleted or null.
     fn findUnused(block: Metadata.Block) ?usize {
-        const mask = Metadata.repeat(.empty);
-        const found = mask == (block & mask);
-        const bits: BitMask = @bitCast(found);
+        const pred = block >= Metadata.repeat(.deleted);
+        const bits: BitMask = @bitCast(pred);
         return if (bits == 0) null else @ctz(bits);
     }
 
@@ -1294,13 +1302,13 @@ const Metadata = packed struct(u8) {
         return Metadata.findHint(vector, .empty);
     }
 
-    fn findUsed(vector: Metadata.Block) BitVector {
-        return vector < Metadata.repeat(.deleted);
+    fn findUsed(block: Metadata.Block) BitVector {
+        return block < Metadata.repeat(.deleted);
     }
 
-    fn prepareRehash(vector: Metadata.Block) Metadata.Block {
+    fn prepareRehash(block: Metadata.Block) Metadata.Block {
         // All slots with the MSB set (empty and deleted).
-        const pred = vector >= Metadata.repeat(.deleted);
+        const pred = block >= Metadata.repeat(.deleted);
         //const pred = vector & 0x80 != 0;
         // Mark all populated entries as deleted and all others as empty.
         return @select(u8, pred, Metadata.repeat(.empty), Metadata.repeat(.deleted));
@@ -1335,37 +1343,56 @@ const Metadata = packed struct(u8) {
     }
 };
 
-test "prepare rehash metadata" {
-    const testing = std.testing;
-    const rehash = struct {
-        fn rehash(vec: *Metadata.Block) void {
-            const pred = vec.* >= Metadata.repeat(.deleted);
-            const to_free = vec.* | Metadata.repeat(.deleted);
-            vec.* = @select(u8, pred, Metadata.repeat(.empty), to_free);
-        }
-    }.rehash;
+test "metadata find hint" {
+    const hash1: Metadata = .{ .hash_hint = 0b1101101, .free = false };
+    const hash2: Metadata = .{ .hash_hint = 0b0011010, .free = false };
 
+    var block = Metadata.repeat(.empty);
+    block[11] = @bitCast(hash1);
+    try tt.expectEqual(11, Metadata.findHint(block, hash1));
+
+    block = Metadata.repeat(hash2);
+    block[0] = @bitCast(Metadata.empty);
+    block[4] = @bitCast(Metadata.empty);
+    block[8] = @bitCast(Metadata.empty);
+    block[12] = @bitCast(Metadata.deleted);
+
+    try tt.expectEqual(null, Metadata.findHint(block, hash1));
+    block[11] = @bitCast(hash1);
+    try tt.expectEqual(11, Metadata.findHint(block, hash1));
+}
+
+test "metadata find unused" {
+    const random_hash: Metadata = .{ .hash_hint = 0b1101101, .free = false };
+
+    var block = Metadata.repeat(random_hash);
+    try tt.expectEqual(null, Metadata.findUnused(block));
+
+    block = Metadata.repeat(random_hash);
+    block[5] = @bitCast(Metadata.empty);
+    try tt.expectEqual(5, Metadata.findUnused(block));
+
+    block = Metadata.repeat(random_hash);
+    block[9] = @bitCast(Metadata.deleted);
+    try tt.expectEqual(9, Metadata.findUnused(block));
+}
+
+test "metadata prepare rehash" {
     const random_hash: Metadata = @bitCast(@as(u8, 0b0101_1001));
-    try testing.expectEqual(false, random_hash.free);
-    try testing.expectEqual(0b1011001, random_hash.hash_hint);
+    try tt.expectEqual(false, random_hash.free);
+    try tt.expectEqual(0b1011001, random_hash.hash_hint);
 
     var vec = Metadata.repeat(random_hash);
-    rehash(&vec);
-    var res: Metadata = @bitCast(vec[0]);
-    try testing.expectEqual(true, res.free);
-    try testing.expectEqual(0b1011001, res.hash_hint);
+    vec = Metadata.prepareRehash(vec);
+    try tt.expectEqual(Metadata.repeat(.deleted), vec);
 
     vec = Metadata.repeat(.empty);
-    rehash(&vec);
-    res = @bitCast(vec[0]);
-    try testing.expectEqual(true, res.free);
-    try testing.expectEqual(0b1111111, res.hash_hint);
+    vec = Metadata.prepareRehash(vec);
+    try tt.expectEqual(Metadata.repeat(.empty), vec);
 
     vec = Metadata.repeat(.deleted);
-    rehash(&vec);
-    res = @bitCast(vec[0]);
-    try testing.expectEqual(true, res.free);
-    try testing.expectEqual(0b1111111, res.hash_hint);
+    vec = Metadata.prepareRehash(vec);
+    try tt.expectEqual(Metadata.repeat(.empty), vec);
 }
 
 fn nextBit(mask: *u16) ?usize {
@@ -1624,6 +1651,19 @@ test "rehash" {
 
     try tt.expectEqual(66, map.len);
     try tt.expectEqual(16, map.remaining_capacity);
+
+    i = 0;
+    while (i < 100) : (i += 1) {
+        if (@mod(i, 3) == 0)
+            try tt.expectEqual(null, map.get(i))
+        else
+            try tt.expectEqual(i, map.get(i));
+    }
+
+    map.rehash();
+
+    try tt.expectEqual(66, map.len);
+    try tt.expectEqual(46, map.remaining_capacity);
 
     i = 0;
     while (i < 100) : (i += 1) {
