@@ -53,6 +53,13 @@ pub const Options = struct {
     max_load_percentage: u8 = 88, // round-up from 87.5, i.e. 1/8th
 };
 
+pub const CloneMode = enum {
+    pub const default: CloneMode = .memcpy;
+
+    memcpy,
+    rehash,
+};
+
 pub const Hash = u64;
 
 pub fn ContextHashMap(
@@ -103,9 +110,9 @@ pub fn ContextHashMap(
 
                 while (true) {
                     if (self.current_block == 0) {
-                        const block = self.map.getAlignedMetadaBlock(self.entry_idx / Metadata.block_size);
+                        const block = self.map.getAlignedMetadaBlock(self.entry_idx / Metadata.Block.len);
                         self.current_block = @bitCast(Metadata.findUsed(block));
-                        self.entry_idx = (self.entry_idx + Metadata.block_size) & Metadata.block_mask; // FIXME:
+                        self.entry_idx = (self.entry_idx + Metadata.Block.len) & Metadata.block_mask; // FIXME:
                         continue;
                     }
 
@@ -176,7 +183,7 @@ pub fn ContextHashMap(
             /// single block of "mirror" slots, which mirror the state of the
             /// first block at all times.
             ///
-            /// There can never be less than `Metadata.block_size` entries in an
+            /// There can never be less than `Metadata.Block.len` entries in an
             /// allocated buffer.
             metadata: [0]Metadata.Block,
 
@@ -243,7 +250,7 @@ pub fn ContextHashMap(
             /// Returns the byte-size of the metadata array for the given number
             /// of entries.
             fn metadataSize(entries: usize) usize {
-                return @sizeOf(Metadata) * (entries + Metadata.block_size);
+                return @sizeOf(Metadata) * (entries + Metadata.Block.len);
             }
         };
 
@@ -255,7 +262,7 @@ pub fn ContextHashMap(
         };
 
         const load_factor_nths = nths(options.max_load_percentage);
-        const load_min_capacity = @max((Metadata.block_size * (load_factor_nths - 1)) / load_factor_nths, 1);
+        const load_min_capacity = @max((Metadata.Block.len * (load_factor_nths - 1)) / load_factor_nths, 1);
 
         const block_align = @alignOf(Metadata.Block);
         const key_align = @alignOf(Key);
@@ -348,6 +355,7 @@ pub fn ContextHashMap(
         pub fn cloneContext(
             self: *const Self,
             allocator: Allocator,
+            mode: CloneMode,
             ctx: Context,
         ) OOM!Self {
             const old_buffer = self.getConstBuffer() orelse return .empty;
@@ -361,19 +369,22 @@ pub fn ContextHashMap(
                 .metadata = @ptrCast(&buffer.metadata),
             };
 
-            const capacity = self.getUsableCapacity() - self.len;
-            if (self.remaining_capacity <= capacity / 2) {
-                cloned.batchInsert(self, ctx);
-                cloned.remaining_capacity = capacity;
-            } else {
-                @memcpy(cloned.getMetadataBlocks(), self.getMetadataBlocks());
-                if (comptime multi_array) {
-                    @memcpy(buffer.header.keys, old_buffer.header.keys);
-                    @memcpy(buffer.header.values, old_buffer.header.values);
-                } else {
-                    @memcpy(buffer.header.kvs, old_buffer.header.kvs);
-                }
-                cloned.remaining_capacity = self.remaining_capacity;
+            switch (mode) {
+                .memcpy => {
+                    @memcpy(cloned.getMetadataBlocks(), self.getMetadataBlocks());
+                    if (comptime multi_array) {
+                        @memcpy(buffer.header.keys, old_buffer.header.keys);
+                        @memcpy(buffer.header.values, old_buffer.header.values);
+                    } else {
+                        @memcpy(buffer.header.kvs, old_buffer.header.kvs);
+                    }
+                    cloned.remaining_capacity = self.remaining_capacity;
+                },
+                .rehash => {
+                    const capacity = self.getUsableCapacity() - self.len;
+                    cloned.batchInsert(self, ctx);
+                    cloned.remaining_capacity = capacity;
+                },
             }
 
             return cloned;
@@ -400,6 +411,10 @@ pub fn ContextHashMap(
             zst_ctx.reserve
         else {};
 
+        /// Rehashes all key-value pairs inplace, without reallocating.
+        ///
+        /// This clears up any locked up capacity from deleted entries, that
+        /// could otherwise not be reused.
         pub fn rehashContext(self: *Self, ctx: Context) void {
             self.rehashInPlace(ctx);
             self.remaining_capacity = self.getUsableCapacity() - self.len;
@@ -707,8 +722,8 @@ pub fn ContextHashMap(
 
         fn isLastInSequence(self: *const Self, probe: *Probe, entry_idx: usize) bool {
             const relative_idx = self.getRelativeIdx(probe.pos, entry_idx);
-            assert(relative_idx < Metadata.block_size);
-            if (relative_idx < Metadata.block_size - 1) {
+            assert(relative_idx < Metadata.Block.len);
+            if (relative_idx < Metadata.Block.len - 1) {
                 // Check, if there is a subsequent empty slot after the entry
                 // index in same block relative to the last probing position.
                 return self.metadata[entry_idx + 1].isEmpty();
@@ -767,9 +782,9 @@ pub fn ContextHashMap(
             //
             // Empty slots can be freely reused, deleted slots indicate entries
             // that need to be rehashed and reinserted.
-            const vectors = self.getMetadataBlocks();
-            for (vectors[0 .. vectors.len - 1]) |*vector|
-                vector.* = Metadata.prepareRehash(vector.*);
+            const blocks = self.getMetadataBlocks();
+            for (blocks[0 .. blocks.len - 1]) |*block|
+                block.* = block.prepareRehash();
 
             outer: for (0..self.getEntries()) |i| {
                 if (self.metadata[i] != Metadata.deleted)
@@ -811,14 +826,14 @@ pub fn ContextHashMap(
             }
 
             // Ensure the final metadata block mirrors the first block.
-            vectors[vectors.len - 1] = vectors[0];
+            blocks[blocks.len - 1] = blocks[0];
         }
 
         fn batchInsert(self: *Self, other: *const Self, ctx: Context) void {
-            const other_vectors = other.getConstMetadataBlocks();
-            for (other_vectors[0 .. other_vectors.len - 1], 0..) |vector, v| {
-                const block_idx = v * Metadata.block_size;
-                var used: Metadata.BitMask = @bitCast(Metadata.findUsed(vector));
+            const other_blocks = other.getConstMetadataBlocks();
+            for (other_blocks[0 .. other_blocks.len - 1], 0..) |block, v| {
+                const block_idx = v * Metadata.Block.len;
+                var used: Metadata.BitMask = @bitCast(block.used());
                 while (nextBit(&used)) |idx| {
                     const entry_idx = block_idx + idx;
                     const key = other.getConstKey(entry_idx);
@@ -866,19 +881,19 @@ pub fn ContextHashMap(
 
             while (true) {
                 const block = self.getMetadataBlock(probe.pos);
-                if (Metadata.findHint(block, hint)) |relative_idx| {
+                if (block.find(hint)) |relative_idx| {
                     const metadata_idx = metadataIdx(probe, relative_idx);
                     if (self.eqlKey(key, hint, metadata_idx, ctx)) |entry_idx|
                         return .{ entry_idx, true };
                 }
 
                 if (insert_idx == null) {
-                    if (Metadata.findUnused(block)) |relative_idx|
+                    if (block.findFree()) |relative_idx|
                         insert_idx = metadataIdx(probe, relative_idx) & self.entry_mask;
                 }
 
                 if (insert_idx) |idx| {
-                    if (Metadata.findEmpty(block)) |_|
+                    if (block.find(.empty)) |_|
                         return .{ idx, false };
                 }
 
@@ -897,7 +912,7 @@ pub fn ContextHashMap(
                 // Search for a metadata block containing the correct hash hint
                 // for the queried key in accordance with the probing sequence.
                 const block = self.getMetadataBlock(probe.pos);
-                if (Metadata.findHint(block, hint)) |relative_idx| {
+                if (block.find(hint)) |relative_idx| {
                     const metadata_idx = metadataIdx(probe, relative_idx);
                     if (self.eqlKey(key, hint, metadata_idx, ctx)) |entry_idx|
                         return entry_idx;
@@ -905,7 +920,7 @@ pub fn ContextHashMap(
 
                 // Upon encountering an empty slot within a probed block stop
                 // searchin further.
-                if (Metadata.findEmpty(block)) |_|
+                if (block.find(.empty)) |_|
                     return null;
 
                 // Try the next vector in the probe sequence.
@@ -927,7 +942,7 @@ pub fn ContextHashMap(
         fn probeInsertIdx(self: *const Self, probe: *Probe) usize {
             while (true) {
                 const block = self.getMetadataBlock(probe.pos); // IDEA: return a bool indicating if we need to wrap?
-                if (Metadata.findUnused(block)) |relative_idx| {
+                if (block.findFree()) |relative_idx| {
                     const entry_idx = metadataIdx(probe, relative_idx) & self.entry_mask;
                     return entry_idx;
                 }
@@ -996,20 +1011,20 @@ pub fn ContextHashMap(
                 // boundary. If yes, wrap around at the end of the cache-line.
                 const end = (entry_idx + cache_line.len) & cache_line.mask;
                 const len = end - entry_idx;
-                if (len < Metadata.block_size) {
+                if (len < Metadata.Block.len) {
                     // Calculate the number of metadata slots that must be read
                     // from the start of the cache.line.
-                    const remaining_len = Metadata.block_size - len;
+                    const remaining_len = Metadata.Block.len - len;
                     const start = entry_idx & cache_line.mask;
 
-                    var block: [Metadata.block_size]Metadata = undefined;
+                    var block: [Metadata.Block.len]Metadata = undefined;
                     @memcpy(block[0..len], self.metadata[entry_idx..][0..len]);
                     @memcpy(block[len..], self.metadata[start..][0..remaining_len]);
                     return @bitCast(block);
                 }
             }
 
-            return @bitCast(self.metadata[entry_idx..][0..Metadata.block_size].*);
+            return @bitCast(self.metadata[entry_idx..][0..Metadata.Block.len].*);
         }
 
         fn getAlignedMetadaBlock(self: *Self, block_idx: usize) *Metadata.Block {
@@ -1027,7 +1042,7 @@ pub fn ContextHashMap(
         /// block.
         fn getConstMetadataBlocks(self: *const Self) []const Metadata.Block {
             const ptr: [*]const Metadata.Block = @ptrCast(self.metadata);
-            const len = (self.entry_mask + 1 + Metadata.block_size) / Metadata.block_size;
+            const len = (self.entry_mask + 1 + Metadata.Block.len) / Metadata.Block.len;
             return ptr[0..len];
         }
 
@@ -1067,7 +1082,7 @@ pub fn ContextHashMap(
         }
 
         fn getBlockIdx(self: *const Self, base_idx: usize, entry_idx: usize) usize {
-            return self.getRelativeIdx(base_idx, entry_idx) / Metadata.block_size;
+            return self.getRelativeIdx(base_idx, entry_idx) / Metadata.Block.len;
         }
 
         fn getRelativeIdx(self: *const Self, base_idx: usize, entry_idx: usize) usize {
@@ -1078,7 +1093,7 @@ pub fn ContextHashMap(
         }
 
         fn getMirrorIdx(self: *const Self, entry_idx: usize) usize {
-            return ((entry_idx -% Metadata.block_size) & self.entry_mask) + Metadata.block_size;
+            return ((entry_idx -% Metadata.Block.len) & self.entry_mask) + Metadata.Block.len;
         }
 
         fn getUsableCapacity(self: *const Self) usize {
@@ -1122,7 +1137,7 @@ pub fn ContextHashMap(
             assert(min_capacity != 0);
             if (min_capacity < load_min_capacity) {
                 @branchHint(.unlikely);
-                return Metadata.block_size;
+                return Metadata.Block.len;
             }
 
             const adjusted_cap = if (comptime load_factor_nths == 100)
@@ -1138,7 +1153,7 @@ pub fn ContextHashMap(
         /// Returns the total usable capacity of the current buffer.
         fn applyLoadLimit(entry_mask: usize) usize {
             const entry_len = entry_mask + 1;
-            if (entry_len <= Metadata.block_size)
+            if (entry_len <= Metadata.Block.len)
                 return load_min_capacity;
 
             return if (comptime load_factor_nths == 100)
@@ -1149,6 +1164,14 @@ pub fn ContextHashMap(
 
         const is_zst_ctx = @sizeOf(Context) == 0;
         const zst_ctx = struct {
+            pub fn clone(
+                self: *const Self,
+                allocator: Allocator,
+                mode: CloneMode,
+            ) OOM!Self {
+                return self.cloneContext(allocator, mode, undefined);
+            }
+
             /// Reserves at least enough capacity for the given number of additional
             /// entries.
             pub fn reserve(
@@ -1232,6 +1255,9 @@ pub fn ContextHashMap(
                 return self.insertFetchUncheckedContext(key, value, undefined);
             }
 
+            /// Inserts the given key-value pair.
+            ///
+            /// Asserts that the key does not yet exist.
             pub fn insertUnique(
                 self: *Self,
                 allocator: Allocator,
@@ -1259,6 +1285,10 @@ pub fn ContextHashMap(
                 return self.getOrInsertKeyContext(allocator, key, undefined);
             }
 
+            /// Returns a pointer to the value for the given key or inserts the
+            /// key and returns a pointer to the uninitialized value.
+            ///
+            /// Asserts that there is available capacity
             pub fn getOrInsertKeyUnchecked(self: *Self, key: Key) GetOrInsert {
                 return self.getOrInsertKeyUncheckedContext(key, undefined);
             }
@@ -1295,77 +1325,61 @@ pub fn ContextHashMap(
 const Metadata = packed struct(u8) {
     const HashHint = u7;
 
-    const Block = @Vector(block_size, u8);
-    const BitVector = @Vector(block_size, bool);
-    const BitMask = std.meta.Int(.unsigned, block_size);
+    const Block = extern struct {
+        const len = 16; // FIXME: only 16 for SSE2
+        const mask = len - 1;
 
-    const block_size = 16;
-    const block_mask = block_size - 1;
-    const vector_indices: Block(block_size, u8) = blk: {
-        var arr: [block_size]u8 = undefined;
-        for (&arr, 0..) |*idx, i|
-            idx.* = @intCast(i);
-        break :blk arr;
+        vector: @Vector(len, u8),
+
+        /// Returns the index of first the slot that equals the given metadata.
+        fn find(self: Block, metadata: Metadata) ?usize {
+            const bits: BitMask = @bitCast(self.vector == Metadata.repeat(metadata).vector);
+            return if (bits == 0) null else @ctz(bits);
+        }
+
+        /// Returns the index of the first slot that is either empty or deleted.
+        fn findFree(self: Block) ?usize {
+            const bits: BitMask = @bitCast(self.vector >= Metadata.repeat(.deleted).vector);
+            return if (bits == 0) null else @ctz(bits);
+        }
+
+        fn used(self: Block) BitVector {
+            return self.vector < Metadata.repeat(.deleted).vector;
+        }
+
+        fn prepareRehash(self: Block) Block {
+            // All slots with the MSB set (empty and deleted).
+            const pred = self.vector >= Metadata.repeat(.deleted).vector;
+            //const pred = vector & 0x80 != 0;
+            // Mark all populated entries as deleted and all others as empty.
+            const vector = @select(
+                u8,
+                pred,
+                Metadata.repeat(.empty).vector,
+                Metadata.repeat(.deleted).vector,
+            );
+
+            return .{ .vector = vector };
+        }
     };
 
-    const empty: Metadata = .{ .hash_hint = ~@as(HashHint, 0) };
-    const deleted: Metadata = .{ .hash_hint = 0 };
+    const BitVector = @Vector(Block.len, bool);
+    const BitMask = std.meta.Int(.unsigned, Block.len);
+
+    const empty: Metadata = .{ .hash_hint = ~@as(HashHint, 0), .free = true };
+    const deleted: Metadata = .{ .hash_hint = 0, .free = true };
 
     hash_hint: HashHint,
-    free: bool = true,
-
-    /// Returns the index of the slot within the block that equals the given
-    /// hint or null.
-    fn findHint(block: Metadata.Block, hint: Metadata) ?usize {
-        const mask = Metadata.repeat(hint);
-        const found = block == mask;
-        const bits: BitMask = @bitCast(found);
-        return if (bits == 0) null else @ctz(bits);
-    }
-
-    /// Returns the index of the first slot within the block that is either
-    /// empty or deleted or null.
-    fn findUnused(block: Metadata.Block) ?usize {
-        const pred = block >= Metadata.repeat(.deleted);
-        const bits: BitMask = @bitCast(pred);
-        return if (bits == 0) null else @ctz(bits);
-    }
-
-    /// Returns the index of the first slot within the block that is empty or
-    /// null.
-    fn findEmpty(vector: Metadata.Block) ?usize {
-        return Metadata.findHint(vector, .empty);
-    }
-
-    fn findUsed(block: Metadata.Block) BitVector {
-        return block < Metadata.repeat(.deleted);
-    }
-
-    fn prepareRehash(block: Metadata.Block) Metadata.Block {
-        // All slots with the MSB set (empty and deleted).
-        const pred = block >= Metadata.repeat(.deleted);
-        //const pred = vector & 0x80 != 0;
-        // Mark all populated entries as deleted and all others as empty.
-        return @select(u8, pred, Metadata.repeat(.empty), Metadata.repeat(.deleted));
-    }
+    free: bool,
 
     fn repeat(self: Metadata) Metadata.Block {
         const bits: u8 = @bitCast(self);
-        return @splat(bits);
+        return .{ .vector = @splat(bits) };
     }
 
     fn hashHint(hash: Hash) Metadata {
         const hint = extractHashHint(hash);
         return .{ .hash_hint = hint, .free = false };
-    }
-
-    fn insert(self: *Metadata, hash: Hash) void {
-        assert(self.free == true);
-        const hint = extractHashHint(hash);
-        self.* = .{
-            .hash_hint = hint,
-            .free = false,
-        };
     }
 
     fn isEmpty(self: Metadata) bool {
@@ -1386,23 +1400,23 @@ const LinearProbe = struct {
     }
 
     fn next(self: *LinearProbe, entry_mask: usize) usize {
-        self.pos = (self.pos + Metadata.block_size) & entry_mask;
+        self.pos = (self.pos + Metadata.Block.len) & entry_mask;
         return self.pos;
     }
 };
 
 const TriangularProbe = struct {
     pos: usize,
-    stride: usize = Metadata.block_size,
+    stride: usize = Metadata.Block.len,
 
     fn start(entry_idx: usize) TriangularProbe {
-        return .{ .pos = entry_idx, .stride = Metadata.block_size };
+        return .{ .pos = entry_idx, .stride = Metadata.Block.len };
     }
 
     fn next(self: *TriangularProbe, entry_mask: usize) usize {
         const pos = (self.pos + self.stride) & entry_mask;
         self.pos = pos;
-        self.stride += Metadata.block_size;
+        self.stride += Metadata.Block.len;
         return pos;
     }
 };
@@ -1416,7 +1430,7 @@ const CacheLineProbe = struct {
     }
 
     fn next(self: *CacheLineProbe, entry_mask: usize) usize {
-        const tentative_next = self.pos + Metadata.block_size;
+        const tentative_next = self.pos + Metadata.Block.len;
         if (self.origin != tentative_next) {
             @branchHint(.likely);
             const cache_line_start = self.origin & cache_line.mask;
@@ -1436,71 +1450,72 @@ const cache_line = struct {
 };
 
 test "cache line probe" {
-    // FIXME: this test is broken if cache line != 64
+    if (cache_line.len != 128)
+        return error.SkipZigTest;
+
     var entry_mask: usize = 256 - 1;
-    var probe = CacheLineProbe(64).start(52);
+    var probe = CacheLineProbe.start(52);
+    try tt.expectEqual(68, probe.next(entry_mask));
+    try tt.expectEqual(84, probe.next(entry_mask));
+    try tt.expectEqual(100, probe.next(entry_mask));
+    try tt.expectEqual(116, probe.next(entry_mask));
     try tt.expectEqual(4, probe.next(entry_mask));
     try tt.expectEqual(20, probe.next(entry_mask));
     try tt.expectEqual(36, probe.next(entry_mask));
     // jump to 2nd cacheline
-    try tt.expectEqual(116, probe.next(entry_mask));
-    try tt.expectEqual(68, probe.next(entry_mask));
-    try tt.expectEqual(84, probe.next(entry_mask));
-    try tt.expectEqual(100, probe.next(entry_mask));
-    // jump to 3rd cache line
     try tt.expectEqual(180, probe.next(entry_mask));
-    try tt.expectEqual(132, probe.next(entry_mask));
-    try tt.expectEqual(148, probe.next(entry_mask));
-    try tt.expectEqual(164, probe.next(entry_mask));
-    // jump to 4th cache line
-    try tt.expectEqual(244, probe.next(entry_mask));
     try tt.expectEqual(196, probe.next(entry_mask));
     try tt.expectEqual(212, probe.next(entry_mask));
     try tt.expectEqual(228, probe.next(entry_mask));
+    try tt.expectEqual(244, probe.next(entry_mask));
+    try tt.expectEqual(132, probe.next(entry_mask));
+    try tt.expectEqual(148, probe.next(entry_mask));
+    try tt.expectEqual(164, probe.next(entry_mask));
     // jump back to 1st cache line
     try tt.expectEqual(52, probe.next(entry_mask));
-    try tt.expectEqual(4, probe.next(entry_mask));
+    try tt.expectEqual(68, probe.next(entry_mask));
+    // ... and so on
 
     entry_mask = 32 - 1;
-    probe = CacheLineProbe(64).start(28);
+    probe = CacheLineProbe.start(28);
     try tt.expectEqual(12, probe.next(entry_mask));
     try tt.expectEqual(28, probe.next(entry_mask));
     try tt.expectEqual(12, probe.next(entry_mask));
     try tt.expectEqual(28, probe.next(entry_mask));
 }
 
-test "metadata find hint" {
+test "metadata find" {
     const hash1: Metadata = .{ .hash_hint = 0b1101101, .free = false };
     const hash2: Metadata = .{ .hash_hint = 0b0011010, .free = false };
 
     var block = Metadata.repeat(.empty);
-    block[11] = @bitCast(hash1);
-    try tt.expectEqual(11, Metadata.findHint(block, hash1));
+    block.vector[11] = @bitCast(hash1);
+    try tt.expectEqual(11, block.find(hash1));
 
     block = Metadata.repeat(hash2);
-    block[0] = @bitCast(Metadata.empty);
-    block[4] = @bitCast(Metadata.empty);
-    block[8] = @bitCast(Metadata.empty);
-    block[12] = @bitCast(Metadata.deleted);
+    block.vector[0] = @bitCast(Metadata.empty);
+    block.vector[4] = @bitCast(Metadata.empty);
+    block.vector[8] = @bitCast(Metadata.empty);
+    block.vector[12] = @bitCast(Metadata.deleted);
 
-    try tt.expectEqual(null, Metadata.findHint(block, hash1));
-    block[11] = @bitCast(hash1);
-    try tt.expectEqual(11, Metadata.findHint(block, hash1));
+    try tt.expectEqual(null, block.find(hash1));
+    block.vector[11] = @bitCast(hash1);
+    try tt.expectEqual(11, block.find(hash1));
 }
 
-test "metadata find unused" {
+test "metadata find free" {
     const random_hash: Metadata = .{ .hash_hint = 0b1101101, .free = false };
 
     var block = Metadata.repeat(random_hash);
-    try tt.expectEqual(null, Metadata.findUnused(block));
+    try tt.expectEqual(null, block.findFree());
 
     block = Metadata.repeat(random_hash);
-    block[5] = @bitCast(Metadata.empty);
-    try tt.expectEqual(5, Metadata.findUnused(block));
+    block.vector[5] = @bitCast(Metadata.empty);
+    try tt.expectEqual(5, block.findFree());
 
     block = Metadata.repeat(random_hash);
-    block[9] = @bitCast(Metadata.deleted);
-    try tt.expectEqual(9, Metadata.findUnused(block));
+    block.vector[9] = @bitCast(Metadata.deleted);
+    try tt.expectEqual(9, block.findFree());
 }
 
 test "metadata prepare rehash" {
@@ -1508,17 +1523,17 @@ test "metadata prepare rehash" {
     try tt.expectEqual(false, random_hash.free);
     try tt.expectEqual(0b1011001, random_hash.hash_hint);
 
-    var vec = Metadata.repeat(random_hash);
-    vec = Metadata.prepareRehash(vec);
-    try tt.expectEqual(Metadata.repeat(.deleted), vec);
+    var block = Metadata.repeat(random_hash);
+    block = block.prepareRehash();
+    try tt.expectEqual(Metadata.repeat(.deleted), block);
 
-    vec = Metadata.repeat(.empty);
-    vec = Metadata.prepareRehash(vec);
-    try tt.expectEqual(Metadata.repeat(.empty), vec);
+    block = Metadata.repeat(.empty);
+    block = block.prepareRehash();
+    try tt.expectEqual(Metadata.repeat(.empty), block);
 
-    vec = Metadata.repeat(.deleted);
-    vec = Metadata.prepareRehash(vec);
-    try tt.expectEqual(Metadata.repeat(.empty), vec);
+    block = Metadata.repeat(.deleted);
+    block = block.prepareRehash();
+    try tt.expectEqual(Metadata.repeat(.empty), block);
 }
 
 fn nextBit(mask: *u16) ?usize {
