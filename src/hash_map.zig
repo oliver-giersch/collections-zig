@@ -92,6 +92,10 @@ pub fn ContextHashMap(
 
         pub const ConstIterator = GenericIterator(true);
         pub const Iterator = GenericIterator(false);
+        pub const ConstKeyIterator = FieldIterator(true, .key);
+        pub const KeyIterator = FieldIterator(false, .key);
+        pub const ConstValueIterator = FieldIterator(true, .value);
+        pub const ValueIterator = FieldIterator(false, .value);
 
         fn GenericIterator(comptime is_const: bool) type {
             return struct {
@@ -101,7 +105,6 @@ pub fn ContextHashMap(
                     struct { key: *const Key, value: *const Value }
                 else
                     struct { key: *Key, value: *Value };
-
                 const MapPointer = if (is_const) *const Self else *Self;
 
                 map: MapPointer,
@@ -123,6 +126,33 @@ pub fn ContextHashMap(
             };
         }
 
+        fn FieldIterator(comptime is_const: bool, comptime kind: enum { key, value }) type {
+            return struct {
+                const Iter = @This();
+
+                pub const Item = if (is_const) *const T else *T;
+                const MapPointer = if (is_const) *const Self else *Self;
+                const T = switch (kind) {
+                    .key => Key,
+                    .value => Value,
+                };
+
+                map: MapPointer,
+                it: EntryIterator,
+
+                pub fn next(self: *Iter) ?Item {
+                    const entry_idx = self.it.next(self.map) orelse return null;
+                    return if (comptime is_const) switch (comptime kind) {
+                        .key => self.map.getConstKey(entry_idx),
+                        .value => self.map.getConstValue(entry_idx),
+                    } else switch (comptime kind) {
+                        .key => self.map.getKey(entry_idx),
+                        .value => self.map.getValue(entry_idx),
+                    };
+                }
+            };
+        }
+
         const EntryIterator = struct {
             remaining_len: usize,
             entry_idx: usize = 0,
@@ -131,7 +161,7 @@ pub fn ContextHashMap(
             pub fn next(self: *EntryIterator, map: *const Self) ?usize {
                 if (self.remaining_len == 0)
                     return null;
-
+                // fixme: start iteration at (-1 - 16)? adds one extra iteration but less code
                 while (true) {
                     const bit = nextBit(&self.current_block) orelse {
                         const blocks: [*]const Metadata.Block = @ptrCast(map.metadata);
@@ -334,21 +364,27 @@ pub fn ContextHashMap(
         }
 
         pub fn iter(self: *Self) Iterator {
-            return .{
-                .map = self,
-                .it = .{ .remaining_len = self.len },
-            };
+            return .{ .map = self, .it = self.entryIter() };
         }
 
         pub fn constIter(self: *const Self) ConstIterator {
-            const blocks: [*]const Metadata.Block = @ptrCast(self.metadata);
-            return .{
-                .map = self,
-                .it = .{
-                    .remaining_len = self.len,
-                    .current_block = @bitCast(blocks[0].used()),
-                },
-            };
+            return .{ .map = self, .it = self.entryIter() };
+        }
+
+        pub fn keyIter(self: *Self) KeyIterator {
+            return .{ .map = self, .it = self.entryIter() };
+        }
+
+        pub fn constKeyIter(self: *const Self) ConstKeyIterator {
+            return .{ .map = self, .it = self.entryIter() };
+        }
+
+        pub fn valueIter(self: *Self) ValueIterator {
+            return .{ .map = self, .it = self.entryIter() };
+        }
+
+        pub fn constValueIter(self: *const Self) ConstValueIterator {
+            return .{ .map = self, .it = self.entryIter() };
         }
 
         /// Clears all map entries but keeps any allocated capacity.
@@ -1013,6 +1049,15 @@ pub fn ContextHashMap(
                 entry_idx
             else
                 null;
+        }
+
+        /// Returns an iterator over all populated entry indices.
+        fn entryIter(self: *const Self) EntryIterator {
+            const blocks: [*]const Metadata.Block = @ptrCast(self.metadata);
+            return .{
+                .remaining_len = self.len,
+                .current_block = @bitCast(blocks[0].used()),
+            };
         }
 
         /// Returs a pointer to the current buffer allocation, if any.
@@ -1979,5 +2024,40 @@ test "const iterator" {
     while (i < 100) : (i += 1) {
         try tt.expectEqual(i, key_list.items[i]);
         try tt.expectEqual(i * 2, value_list.items[i]);
+    }
+}
+
+test "value iterator" {
+    const BoundedArrayList = @import("array_list.zig").BoundedArrayList(u32);
+
+    var map: HashMap(u32, u32, .default) = .empty;
+    defer map.deinit(tt.allocator);
+
+    var i: u32 = 0;
+    while (i < 100) : (i += 1) {
+        const prev = try map.insertFetch(tt.allocator, i, i * 2);
+        try tt.expectEqual(null, prev);
+    }
+
+    var values: [100]u32 = undefined;
+    var value_list: BoundedArrayList = .init(&values);
+
+    {
+        var value_it = map.valueIter();
+        while (value_it.next()) |value| {
+            value.* *= 2;
+        }
+    }
+
+    var it = map.constValueIter();
+    while (it.next()) |value| {
+        try value_list.push(value.*);
+    }
+
+    mem.sort(u32, value_list.items, {}, std.sort.asc(u32));
+
+    i = 0;
+    while (i < 100) : (i += 1) {
+        try tt.expectEqual(i * 4, value_list.items[i]);
     }
 }
