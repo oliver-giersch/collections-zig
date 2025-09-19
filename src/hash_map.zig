@@ -1432,7 +1432,7 @@ const CacheLineProbe = struct {
 
 const cache_line = struct {
     const len: usize = std.atomic.cache_line;
-    const mask: usize = ~@as(usize, 64 - 1);
+    const mask: usize = ~@as(usize, cache_line.len - 1);
 };
 
 test "cache line probe" {
@@ -1754,9 +1754,11 @@ test "insert cache line probing" {
     var i: i32 = 0;
     while (i < 100) : (i += 1) {
         const is: usize = @intCast(i);
-        try tt.expectEqual(is, map.len);
-        try tt.expectEqual(map.getUsableCapacity() - is, map.remaining_capacity);
-        try map.insert(allocator, i, {});
+        const found = try map.insertFetch(allocator, i, {});
+        try tt.expectEqual(null, found);
+
+        try tt.expectEqual(is + 1, map.len);
+        try tt.expectEqual(map.getUsableCapacity() - (is + 1), map.remaining_capacity);
     }
 
     try tt.expectEqual(112, map.getUsableCapacity());
