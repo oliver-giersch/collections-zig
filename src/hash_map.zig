@@ -125,7 +125,7 @@ pub fn ContextHashMap(
 
         const EntryIterator = struct {
             remaining_len: usize,
-            block_idx: usize = 0,
+            entry_idx: usize = 0,
             current_block: Metadata.BitMask = 0,
 
             pub fn next(self: *EntryIterator, map: *const Self) ?usize {
@@ -134,15 +134,15 @@ pub fn ContextHashMap(
 
                 while (true) {
                     const bit = nextBit(&self.current_block) orelse {
-                        const blocks = map.getConstMetadataBlocks();
-                        const block = &blocks[self.block_idx / Metadata.Block.len];
-                        self.block_idx += 1;
+                        const blocks: [*]const Metadata.Block = @ptrCast(map.metadata);
+                        self.entry_idx = self.entry_idx + Metadata.Block.len;
+                        const block = blocks[self.entry_idx / Metadata.Block.len];
                         self.current_block = @bitCast(block.used());
                         continue;
                     };
 
                     self.remaining_len -= 1;
-                    return (self.block_idx * Metadata.Block.len) + bit;
+                    return self.entry_idx + bit;
                 }
             }
         };
@@ -341,9 +341,13 @@ pub fn ContextHashMap(
         }
 
         pub fn constIter(self: *const Self) ConstIterator {
+            const blocks: [*]const Metadata.Block = @ptrCast(self.metadata);
             return .{
                 .map = self,
-                .it = .{ .remaining_len = self.len },
+                .it = .{
+                    .remaining_len = self.len,
+                    .current_block = @bitCast(blocks[0].used()),
+                },
             };
         }
 
@@ -1952,7 +1956,8 @@ test "const iterator" {
 
     var i: u32 = 0;
     while (i < 100) : (i += 1) {
-        _ = try map.insert(tt.allocator, i, i * 2);
+        const prev = try map.insertFetch(tt.allocator, i, i * 2);
+        try tt.expectEqual(null, prev);
     }
 
     var keys: [100]u32 = undefined;
@@ -1962,6 +1967,7 @@ test "const iterator" {
 
     var it = map.constIter();
     while (it.next()) |entry| {
+        try tt.expectEqual(2 * entry.key.*, entry.value.*);
         try key_list.push(entry.key.*);
         try value_list.push(entry.value.*);
     }
