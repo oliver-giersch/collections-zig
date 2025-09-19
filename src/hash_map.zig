@@ -90,45 +90,54 @@ pub fn ContextHashMap(
         /// The comptime configuration options.
         pub const options = O;
 
-        /// The key-value iterator.
-        pub const ConstIterator = struct {
-            pub const Entry = struct {
-                key: *const Key,
-                value: *const Value,
-            };
+        pub const ConstIterator = GenericIterator(true);
+        pub const Iterator = GenericIterator(false);
 
-            // TODO: iterate blocks, not the block copy (?) current block pointer/index
-            map: *const Self,
-            remaining_len: usize,
-            entry_idx: usize = 0,
-            current_block: Metadata.BitMask = 0,
+        fn GenericIterator(comptime is_const: bool) type {
+            return struct {
+                const Iter = @This();
 
-            pub fn next(self: *ConstIterator) ?ConstIterator.Entry {
-                if (self.remaining_len == 0) {
-                    return null;
-                }
+                pub const Entry = if (is_const)
+                    struct { key: *const Key, value: *const Value }
+                else
+                    struct { key: *Key, value: *Value };
 
-                while (true) {
-                    if (self.current_block == 0) {
-                        const block = self.map.getAlignedMetadaBlock(self.entry_idx / Metadata.Block.len);
-                        self.current_block = @bitCast(Metadata.findUsed(block));
-                        self.entry_idx = (self.entry_idx + Metadata.Block.len) & Metadata.block_mask; // FIXME:
-                        continue;
+                const MapPointer = if (is_const) *const Self else *Self;
+
+                map: MapPointer,
+                remaining_len: usize,
+                entry_idx: usize = 0,
+                current_block: Metadata.BitMask = 0,
+
+                pub fn next(self: *Iter) ?Iter.Entry {
+                    if (self.remaining_len == 0)
+                        return null;
+
+                    while (true) {
+                        if (self.current_block == 0) {
+                            const blocks = self.map.getConstMetadataBlocks();
+                            const block = &blocks[self.entry_idx / Metadata.Block.len];
+                            self.current_block = block.used();
+                            self.entry_idx = (self.entry_idx + Metadata.Block.len) & Metadata.Block.mask;
+                            continue;
+                        }
+
+                        // FIXME/better: mask lower bits rather than shifting!
+                        const ctz = @ctz(self.current_block);
+                        self.entry_idx += ctz;
+                        self.remaining_len -= 1;
+                        self.current_block >>= ctz;
+
+                        const idx = self.entry_idx;
+                        // FIXME: use abstract fn getEntry(idx) ...
+                        return .{
+                            .key = self.map.getConstKey(idx),
+                            .value = self.map.getConstValue(idx),
+                        };
                     }
-
-                    const ctz = @ctz(self.current_block);
-                    self.entry_idx += ctz;
-                    self.remaining_len -= 1;
-                    self.current_block >>= ctz;
-
-                    const idx = self.entry_idx;
-                    return .{
-                        .key = self.map.getConstKey(idx),
-                        .value = self.map.getConstValue(idx),
-                    };
                 }
-            }
-        };
+            };
+        }
 
         pub const KeyValue = struct {
             key: Key,
@@ -1025,11 +1034,6 @@ pub fn ContextHashMap(
             }
 
             return @bitCast(self.metadata[entry_idx..][0..Metadata.Block.len].*);
-        }
-
-        fn getAlignedMetadaBlock(self: *Self, block_idx: usize) *Metadata.Block {
-            const vectors = self.getMetadataBlocks();
-            return &vectors[block_idx];
         }
 
         /// Returns a slice of all metadata blocks including the mirror slot
