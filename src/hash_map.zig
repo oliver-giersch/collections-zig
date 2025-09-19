@@ -105,39 +105,47 @@ pub fn ContextHashMap(
                 const MapPointer = if (is_const) *const Self else *Self;
 
                 map: MapPointer,
-                remaining_len: usize,
-                entry_idx: usize = 0,
-                current_block: Metadata.BitMask = 0,
+                it: EntryIterator,
 
                 pub fn next(self: *Iter) ?Iter.Entry {
-                    if (self.remaining_len == 0)
-                        return null;
-
-                    while (true) {
-                        if (self.current_block == 0) {
-                            const blocks = self.map.getConstMetadataBlocks();
-                            const block = &blocks[self.entry_idx / Metadata.Block.len];
-                            self.current_block = block.used();
-                            self.entry_idx = (self.entry_idx + Metadata.Block.len) & Metadata.Block.mask;
-                            continue;
+                    const entry_idx = self.it.next(self.map) orelse return null;
+                    return if (comptime is_const)
+                        .{
+                            .key = self.map.getConstKey(entry_idx),
+                            .value = self.map.getConstValue(entry_idx),
                         }
-
-                        // FIXME/better: mask lower bits rather than shifting!
-                        const ctz = @ctz(self.current_block);
-                        self.entry_idx += ctz;
-                        self.remaining_len -= 1;
-                        self.current_block >>= ctz;
-
-                        const idx = self.entry_idx;
-                        // FIXME: use abstract fn getEntry(idx) ...
-                        return .{
-                            .key = self.map.getConstKey(idx),
-                            .value = self.map.getConstValue(idx),
+                    else
+                        .{
+                            .key = self.map.getKey(entry_idx),
+                            .value = self.map.getValue(entry_idx),
                         };
-                    }
                 }
             };
         }
+
+        const EntryIterator = struct {
+            remaining_len: usize,
+            block_idx: usize = 0,
+            current_block: Metadata.BitMask = 0,
+
+            pub fn next(self: *EntryIterator, map: *const Self) ?usize {
+                if (self.remaining_len == 0)
+                    return null;
+
+                while (true) {
+                    const bit = nextBit(&self.current_block) orelse {
+                        const blocks = map.getConstMetadataBlocks();
+                        const block = &blocks[self.block_idx / Metadata.Block.len];
+                        self.block_idx += 1;
+                        self.current_block = @bitCast(block.used());
+                        continue;
+                    };
+
+                    self.remaining_len -= 1;
+                    return (self.block_idx * Metadata.Block.len) + bit;
+                }
+            }
+        };
 
         pub const KeyValue = struct {
             key: Key,
@@ -323,6 +331,20 @@ pub fn ContextHashMap(
             if (self.getBuffer()) |buffer| {
                 buffer.free(allocator, self.getEntries());
             }
+        }
+
+        pub fn iter(self: *Self) Iterator {
+            return .{
+                .map = self,
+                .it = .{ .remaining_len = self.len },
+            };
+        }
+
+        pub fn constIter(self: *const Self) ConstIterator {
+            return .{
+                .map = self,
+                .it = .{ .remaining_len = self.len },
+            };
         }
 
         /// Clears all map entries but keeps any allocated capacity.
@@ -1540,7 +1562,7 @@ test "metadata prepare rehash" {
     try tt.expectEqual(Metadata.repeat(.empty), block);
 }
 
-fn nextBit(mask: *u16) ?usize {
+fn nextBit(mask: *Metadata.BitMask) ?usize {
     const curr = mask.*;
     if (curr == 0)
         return null;
@@ -1920,4 +1942,36 @@ test "get or insert sum" {
 test "get or insert allocation failure" {
     var map: StringHashMap(void, .default) = .empty;
     try tt.expectError(error.OutOfMemory, map.getOrInsertKey(tt.failing_allocator, "hello"));
+}
+
+test "const iterator" {
+    const BoundedArrayList = @import("array_list.zig").BoundedArrayList(u32);
+
+    var map: HashMap(u32, u32, .default) = .empty;
+    defer map.deinit(tt.allocator);
+
+    var i: u32 = 0;
+    while (i < 100) : (i += 1) {
+        _ = try map.insert(tt.allocator, i, i * 2);
+    }
+
+    var keys: [100]u32 = undefined;
+    var key_list: BoundedArrayList = .init(&keys);
+    var values: [100]u32 = undefined;
+    var value_list: BoundedArrayList = .init(&values);
+
+    var it = map.constIter();
+    while (it.next()) |entry| {
+        try key_list.push(entry.key.*);
+        try value_list.push(entry.value.*);
+    }
+
+    mem.sort(u32, key_list.items, {}, std.sort.asc(u32));
+    mem.sort(u32, value_list.items, {}, std.sort.asc(u32));
+
+    i = 0;
+    while (i < 100) : (i += 1) {
+        try tt.expectEqual(i, key_list.items[i]);
+        try tt.expectEqual(i * 2, value_list.items[i]);
+    }
 }
