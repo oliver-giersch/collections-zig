@@ -1,3 +1,6 @@
+// TODO: reimplement AutoContext
+// TODO:
+
 pub fn HashMap(comptime K: type, V: type, comptime O: Options) type {
     return HashMapContext(K, V, std.hash_map.AutoContext(K), O);
 }
@@ -102,6 +105,7 @@ pub const CloneMode = enum {
 
 pub const Hash = u64;
 
+/// An unmanaged hash map with explicit hash and equality context.
 pub fn HashMapContext(
     comptime K: type,
     comptime V: type,
@@ -153,14 +157,13 @@ pub fn HashMapContext(
 
         fn GenericIterator(comptime is_const: bool) type {
             return struct {
-                const Iter = @This();
-
                 pub const Entry = if (is_const)
                     struct { key: *const Key, value: *const Value }
                 else
                     struct { key: *Key, value: *Value };
                 const MapPointer = if (is_const) *const Self else *Self;
 
+                /// The parent hash map.
                 map: MapPointer,
                 it: EntryIterator,
 
@@ -168,7 +171,7 @@ pub fn HashMapContext(
                 /// advances the iterator.
                 ///
                 /// The entries are iterated in no particular order.
-                pub fn next(self: *Iter) ?Iter.Entry {
+                pub fn next(self: *@This()) ?@This().Entry {
                     const entry_idx = self.it.next(self.map) orelse return null;
                     return if (comptime is_const)
                         .{
@@ -186,8 +189,6 @@ pub fn HashMapContext(
 
         fn GenericValueIterator(comptime is_const: bool) type {
             return struct {
-                const Iter = @This();
-
                 pub const Item = if (is_const) *const Value else *Value;
                 const MapPointer = if (is_const) *const Self else *Self;
 
@@ -198,7 +199,7 @@ pub fn HashMapContext(
                 /// the iterator.
                 ///
                 /// The entries are iterated in no particular order.
-                pub fn next(self: *Iter) ?Item {
+                pub fn next(self: *@This()) ?Item {
                     const entry_idx = self.it.next(self.map) orelse return null;
                     return if (comptime is_const)
                         self.map.getConstValue(entry_idx)
@@ -216,7 +217,7 @@ pub fn HashMapContext(
             pub fn next(self: *EntryIterator, map: *const Self) ?usize {
                 if (self.remaining_len == 0)
                     return null;
-                // fixme: start iteration at (-1 - 16)? adds one extra iteration but less code
+                // fixme: start iteration at (-1 - 16)? adds one extra iteration but less code ...
                 while (true) {
                     const bit = nextBit(&self.current_block) orelse {
                         const blocks: [*]const Metadata.Block = @ptrCast(map.metadata);
@@ -445,6 +446,7 @@ pub fn HashMapContext(
         pub fn deinit(self: *Self, allocator: Allocator) void {
             self.pointer_stability.assertUnlocked();
             if (self.getBuffer()) |buffer| {
+                @branchHint(.likely);
                 buffer.free(allocator, self.getEntries());
             }
 
@@ -515,6 +517,15 @@ pub fn HashMapContext(
             return self.len + self.remaining_capacity;
         }
 
+        /// Clones the hash map and returns the clone.
+        ///
+        /// The given mode specifies, whether the map is cloned as-is (using a
+        /// memcpy) or by rehashing, meaning the every key-value pair is hashed
+        /// and inserted again.
+        ///
+        /// The second mode is preferrable, if the map was used very dynamically
+        /// prior to being cloned, with frequent and intermixed insertions and
+        /// deletions, leading to
         pub fn cloneContext(
             self: *const Self,
             allocator: Allocator,
