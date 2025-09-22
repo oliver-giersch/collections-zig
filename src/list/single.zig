@@ -34,6 +34,14 @@ pub const List = struct {
         after.next = link;
     }
 
+    pub fn removeHead(self: *Self) ?*Self.Link {
+        const link = self.head orelse return null;
+        self.head = link.next;
+
+        link.* = undefined;
+        return link;
+    }
+
     pub fn remove(self: *Self, link: *Self.Link) void {
         assert(self.contains(link));
 
@@ -68,7 +76,7 @@ pub const Queue = struct {
     pub const constIter = Mixin(Self).constIter;
     pub const iter = Mixin(Self).iter;
 
-    pub fn insertFront(self: *Self, link: *Self.Link) void {
+    pub fn insertHead(self: *Self, link: *Self.Link) void {
         assert(!self.contains(link));
 
         link.next = self.head;
@@ -79,7 +87,7 @@ pub const Queue = struct {
         }
     }
 
-    pub fn insertBack(self: *Self, link: *Self.Link) void {
+    pub fn insertTail(self: *Self, link: *Self.Link) void {
         assert(!self.contains(link));
 
         link.next = null;
@@ -97,6 +105,18 @@ pub const Queue = struct {
             @branchHint(.unlikely);
             self.tail = &link.next;
         }
+    }
+
+    pub fn removeHead(self: *Self) ?*Self.Link {
+        const link = self.head orelse return null;
+        self.head = link.next;
+        if (link.next == null) {
+            @branchHint(.unlikely);
+            self.tail = &self.head;
+        }
+
+        link.* = undefined;
+        return link;
     }
 
     pub fn remove(self: *Self, link: *Self.Link) void {
@@ -208,8 +228,8 @@ test "squeue remove" {
     queue.empty();
     var links: [2]Queue.Link = undefined;
 
-    queue.insertBack(&links[0]);
-    queue.insertBack(&links[1]);
+    queue.insertTail(&links[0]);
+    queue.insertTail(&links[1]);
 
     queue.remove(&links[1]);
     queue.remove(&links[0]);
