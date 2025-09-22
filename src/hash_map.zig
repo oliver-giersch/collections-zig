@@ -1,9 +1,13 @@
 pub fn HashMap(comptime K: type, V: type, comptime O: Options) type {
-    return ContextHashMap(K, V, std.hash_map.AutoContext(K), O);
+    return HashMapContext(K, V, std.hash_map.AutoContext(K), O);
 }
 
 pub fn StringHashMap(comptime V: type, comptime O: Options) type {
-    return ContextHashMap([]const u8, V, StringContext, O);
+    return HashMapContext([]const u8, V, StringContext, O);
+}
+
+pub fn AutoHashMap(comptime K: type, comptime V: type, comptime O: Options) type {
+    return HashMapContext(K, V, AutoContext(K), O);
 }
 
 pub const StringContext = struct {
@@ -17,6 +21,42 @@ pub const StringContext = struct {
         return Wyhash.hash(0, str);
     }
 };
+
+pub fn AutoContext(comptime T: type) type {
+    return struct {
+        pub const eql = autoEqlFn(@This(), T);
+        pub const hash = autoHashFn(@This(), T);
+    };
+}
+
+pub fn autoEqlFn(comptime C: type, comptime T: type) (fn (C, T, T) bool) {
+    return struct {
+        fn eql(_: C, a: T, b: T) bool {
+            return std.meta.eql(a, b);
+        }
+    }.eql;
+}
+
+pub fn autoHashFn(comptime C: type, comptime T: type) (fn (C, T) Hash) {
+    if (T == []const u8) {
+        @compileError(
+            \\ Hashing for byte slices is ambiguous.
+            \\ Use `collections.hash_map.StringContext` for hashing strings.
+        );
+    }
+
+    return struct {
+        fn hash(_: C, key: T) Hash {
+            return if (std.meta.hasUniqueRepresentation(T))
+                Wyhash.hash(0, mem.asBytes(&key))
+            else blk: {
+                var hasher = Wyhash.init(0);
+                std.hash.autoHash(&hasher, key);
+                break :blk hasher.final();
+            };
+        }
+    }.hash;
+}
 
 /// A global (static) placeholder metadata vector used as default buffer pointer
 /// for allocation-less hash maps.
@@ -62,7 +102,7 @@ pub const CloneMode = enum {
 
 pub const Hash = u64;
 
-pub fn ContextHashMap(
+pub fn HashMapContext(
     comptime K: type,
     comptime V: type,
     comptime C: type,
@@ -79,6 +119,7 @@ pub fn ContextHashMap(
             .remaining_capacity = 0,
             .entry_mask = 0,
             .metadata = @ptrCast(&empty_vector),
+            .pointer_stability = .unlocked,
         };
 
         /// The key type.
@@ -90,10 +131,16 @@ pub fn ContextHashMap(
         /// The comptime configuration options.
         pub const options = O;
 
+        /// An unordered iterator over key-value const pointers.
         pub const ConstIterator = GenericIterator(true);
+        /// An unordered iterator over key-value pointers.
         pub const Iterator = GenericIterator(false);
+        /// An unordered iterator over value const pointers.
         pub const ConstValueIterator = GenericValueIterator(true);
+        /// An unordered iterator over value pointers.
         pub const ValueIterator = GenericValueIterator(false);
+
+        /// An unordered iterator over const key pointers.
         pub const KeyIterator = struct {
             map: *const Self,
             it: EntryIterator,
@@ -117,6 +164,10 @@ pub fn ContextHashMap(
                 map: MapPointer,
                 it: EntryIterator,
 
+                /// Returns the next key-value pair in the iterator sequence and
+                /// advances the iterator.
+                ///
+                /// The entries are iterated in no particular order.
                 pub fn next(self: *Iter) ?Iter.Entry {
                     const entry_idx = self.it.next(self.map) orelse return null;
                     return if (comptime is_const)
@@ -143,6 +194,10 @@ pub fn ContextHashMap(
                 map: MapPointer,
                 it: EntryIterator,
 
+                /// Returns the next value in the iterator sequence and advances
+                /// the iterator.
+                ///
+                /// The entries are iterated in no particular order.
                 pub fn next(self: *Iter) ?Item {
                     const entry_idx = self.it.next(self.map) orelse return null;
                     return if (comptime is_const)
@@ -167,7 +222,7 @@ pub fn ContextHashMap(
                         const blocks: [*]const Metadata.Block = @ptrCast(map.metadata);
                         self.entry_idx = self.entry_idx + Metadata.Block.len;
                         const block = blocks[self.entry_idx / Metadata.Block.len];
-                        self.current_block = @bitCast(block.used());
+                        self.current_block = block.used();
                         continue;
                     };
 
@@ -254,27 +309,35 @@ pub fn ContextHashMap(
                 assert(isPow2(entries));
                 const n = Buffer.calculateSize(entries);
                 const buf = try allocator.alignedAlloc(u8, Buffer.alignment, n);
+                errdefer comptime unreachable;
+
                 const start = @intFromPtr(buf.ptr);
 
+                // Set all metadata slots to their empty default state.
                 const buffer: *Buffer = @ptrCast(buf.ptr);
                 const metadata: [*]Metadata.Block = &buffer.metadata;
                 @memset(metadata[0..entries], Metadata.repeat(.empty));
 
+                // Advance memory address to the (unaligned) start of the
+                // key-value or key array.
                 var address = @intFromPtr(metadata);
                 address += metadataSize(entries);
 
                 if (comptime multi_array) {
+                    // Align the address the key type alignment.
                     address = Alignment.of(Key).forward(address);
                     const keys: [*]Key = @ptrFromInt(address);
                     @memset(keys[0..entries], undefined);
                     address += @sizeOf(Key) * entries;
 
+                    // Align the address to the value type alignment.
                     address = Alignment.of(Value).forward(address);
                     const values: [*]Value = @ptrFromInt(address);
                     @memset(values[0..entries], undefined);
                     address += @sizeOf(Value) * entries;
                     buffer.header = .{ .keys = keys, .values = values };
                 } else {
+                    // Align the address the key-value struct alignment.
                     address = Alignment.of(KeyValue).forward(address);
                     const kvs: [*]KeyValue = @ptrFromInt(address);
                     @memset(kvs[0..entries], undefined);
@@ -301,7 +364,8 @@ pub fn ContextHashMap(
             }
         };
 
-        /// An abstraction for the implemented probing sequence.
+        // The abstraction for the probing sequence selected through comptime
+        // configuration.
         const Probe = switch (options.probing_strategy) {
             .linear => LinearProbe,
             .triangular => TriangularProbe,
@@ -309,7 +373,10 @@ pub fn ContextHashMap(
         };
 
         const load_factor_nths = nths(options.max_load_percentage);
-        const load_min_capacity = @max((Metadata.Block.len * (load_factor_nths - 1)) / load_factor_nths, 1);
+        const load_min_capacity = @max(
+            (Metadata.Block.len * (load_factor_nths - 1)) / load_factor_nths,
+            1,
+        );
 
         const block_align = @alignOf(Metadata.Block);
         const key_align = @alignOf(Key);
@@ -335,6 +402,19 @@ pub fn ContextHashMap(
         /// buffer header followed by the metadata array and the key-value
         /// array(s).
         metadata: [*]align(block_align) Metadata,
+        /// The safety lock for ensuring pointer stability, i.e. to prevent
+        /// relocation of map entries while the lock is held.
+        ///
+        /// All key-value pairs are relocated, whenever the map's backing
+        /// allocation has to be resized but are guaranteed to remain stable,
+        /// during any purely reading operations or those, that insert or remove
+        /// entries within the current capacity limit.
+        ///
+        /// In other words, while holding this lock is it safe to store any key
+        /// pointers returned by lookups and use them to cheaply retrieve their
+        /// associated values without hashing with the `getByPtr` or
+        /// `getConstByPtr`.
+        pointer_stability: SafetyLock,
 
         /// Returns an initialized hash map with sufficient capacity for at
         /// least the given number of entries.
@@ -342,6 +422,8 @@ pub fn ContextHashMap(
             if (capacity == 0)
                 return .empty;
 
+            // Calculate the number of map entries for the requested minimum
+            // capacity taking the maximum load factor into account.
             const entries = try entriesForCapacity(capacity);
             const entry_mask = entries - 1;
             const remaining_capacity = applyLoadLimit(entry_mask);
@@ -357,34 +439,48 @@ pub fn ContextHashMap(
 
         /// Deinitializes the map and deallocates its allocated buffer,
         /// if any.
+        ///
+        /// The deinitialized map must not be used again without subsequent
+        /// re-initialization.
         pub fn deinit(self: *Self, allocator: Allocator) void {
+            self.pointer_stability.assertUnlocked();
             if (self.getBuffer()) |buffer| {
                 buffer.free(allocator, self.getEntries());
             }
+
+            self.* = undefined;
         }
 
+        /// Returns an iterator over all key-value pairs by pointer.
         pub fn iter(self: *Self) Iterator {
             return .{ .map = self, .it = self.entryIter() };
         }
 
+        /// Returns an iterator over all key-value pairs by pointer.
         pub fn constIter(self: *const Self) ConstIterator {
             return .{ .map = self, .it = self.entryIter() };
         }
 
+        /// Returns an iterator over all values by pointer.
         pub fn valueIter(self: *Self) ValueIterator {
             return .{ .map = self, .it = self.entryIter() };
         }
 
+        /// Returns an iterator over all values by pointer.
         pub fn constValueIter(self: *const Self) ConstValueIterator {
             return .{ .map = self, .it = self.entryIter() };
         }
 
+        /// Returns an iterator over all keys by pointer.
         pub fn keyIter(self: *const Self) KeyIterator {
             return .{ .map = self, .it = self.entryIter() };
         }
 
         /// Clears all map entries but keeps any allocated capacity.
         pub fn clear(self: *Self) void {
+            self.pointer_stability.lock();
+            defer self.pointer_stability.unlock();
+
             if (self.noAlloc()) {
                 @branchHint(.unlikely);
                 assert(self.remaining_capacity == 0 and self.len == 0);
@@ -429,6 +525,8 @@ pub fn ContextHashMap(
 
             const entries = self.getEntries();
             const buffer = try Buffer.alloc(allocator, entries);
+            errdefer comptime unreachable;
+
             var cloned = Self{
                 .len = self.len,
                 .remaining_capacity = undefined,
@@ -483,6 +581,9 @@ pub fn ContextHashMap(
         /// This clears up any locked up capacity from deleted entries, that
         /// could otherwise not be reused.
         pub fn rehashContext(self: *Self, ctx: Context) void {
+            self.pointer_stability.lock();
+            defer self.pointer_stability.unlock();
+
             self.rehashInPlace(ctx);
             self.remaining_capacity = self.getUsableCapacity() - self.len;
         }
@@ -536,6 +637,7 @@ pub fn ContextHashMap(
             zst_ctx.getPtr
         else {};
 
+        /// Returns a const pointer to the value for the given key.
         pub fn getContext(self: *const Self, key: Key, ctx: Context) ?Value {
             const ptr = self.getConstPtrContext(key, ctx) orelse return null;
             return ptr.*;
@@ -578,6 +680,8 @@ pub fn ContextHashMap(
             zst_ctx.insertUnchecked
         else {};
 
+        /// Inserts the given key-value pair and returns the previous value
+        /// associated with the key, if any.
         pub fn insertFetchContext(
             self: *Self,
             allocator: Allocator,
@@ -603,8 +707,8 @@ pub fn ContextHashMap(
             zst_ctx.insertFetch
         else {};
 
-        /// Inserts the given key-value pair and returns a copy of the previous
-        /// value, if any.
+        /// Inserts the given key-value pair and returns the previous value
+        /// associated with the key, if any.
         ///
         /// Asserts, that there is capacity available.
         pub fn insertFetchUncheckedContext(
@@ -632,6 +736,7 @@ pub fn ContextHashMap(
             value: Value,
             ctx: Context,
         ) OOM!void {
+            assert(!self.containsContext(key, ctx));
             const hash, const hint = hashKey(key, ctx);
             var entry_idx = self.findInsertIdx(hash);
 
@@ -787,7 +892,11 @@ pub fn ContextHashMap(
             zst_ctx.removeFetch
         else {};
 
-        fn isLastInSequence(self: *const Self, probe: *Probe, entry_idx: usize) bool {
+        fn isLastInSequence(
+            self: *const Self,
+            probe: *Probe,
+            entry_idx: usize,
+        ) bool {
             const relative_idx = self.getRelativeIdx(probe.pos, entry_idx);
             assert(relative_idx < Metadata.Block.len);
             if (relative_idx < Metadata.Block.len - 1) {
@@ -810,6 +919,12 @@ pub fn ContextHashMap(
         ) OOM!void {
             @branchHint(.cold);
             assert(self.remaining_capacity < count);
+
+            // Enforce that no consumer is relying on pointer stability when
+            // the map is resized.
+            self.pointer_stability.lock();
+            defer self.pointer_stability.unlock();
+
             const old_cap = self.getUsableCapacity();
             const new_cap = try overflowingAdd(self.len, count);
 
@@ -826,6 +941,7 @@ pub fn ContextHashMap(
             const new_entries = try entriesForCapacity(@max(old_cap + 1, new_cap));
             const entry_mask = new_entries - 1;
             const buffer = try Buffer.alloc(allocator, new_entries);
+            errdefer comptime unreachable;
 
             var old_table = self.*;
             self.* = .{
@@ -833,8 +949,11 @@ pub fn ContextHashMap(
                 .remaining_capacity = applyLoadLimit(entry_mask) - old_table.len,
                 .entry_mask = entry_mask,
                 .metadata = @ptrCast(&buffer.metadata),
+                .pointer_stability = .locked,
             };
 
+            // Insert all key-value pairs from the previous map into the newly
+            // allocated buffer.
             self.batchInsert(&old_table, ctx);
             if (old_table.getBuffer()) |old_buffer|
                 old_buffer.free(allocator, old_table.getEntries());
@@ -859,6 +978,10 @@ pub fn ContextHashMap(
 
                 const key = self.getKey(i);
                 inner: while (true) {
+                    // Rehash the key at the current index' slot.
+                    // NOTE: The pointer always points at the same address, but
+                    // the key behind this address may change inbetween
+                    // iterations.
                     const hash, const hint = hashKey(key.*, ctx);
                     var probe = self.probeHash(hash);
 
@@ -880,10 +1003,18 @@ pub fn ContextHashMap(
                     self.metadata[entry_idx] = hint;
 
                     if (metadata == Metadata.empty) {
+                        // The insertion index is empty and therefore free to
+                        // use. Copy the key and value into their new slot and
+                        // move on to the next index.
                         insert_key.* = key.*;
                         insert_value.* = value.*;
                         continue :outer;
                     } else {
+                        // The insertion index belongs to a previously inhabited
+                        // slot (inhabited slots are marked as deleted during
+                        // the rehash preparation). We swap the key-value pairs
+                        // and continue by trying to find an empty slot for the
+                        // swapped out key-value pair.
                         assert(metadata == Metadata.deleted);
                         mem.swap(Key, key, insert_key);
                         mem.swap(Value, value, insert_value);
@@ -900,7 +1031,7 @@ pub fn ContextHashMap(
             const other_blocks = other.getConstMetadataBlocks();
             for (other_blocks[0 .. other_blocks.len - 1], 0..) |block, v| {
                 const block_idx = v * Metadata.Block.len;
-                var used: Metadata.BitMask = @bitCast(block.used());
+                var used = block.used();
                 while (nextBit(&used)) |idx| {
                     const entry_idx = block_idx + idx;
                     const key = other.getConstKey(entry_idx);
@@ -1052,7 +1183,7 @@ pub fn ContextHashMap(
             const blocks: [*]const Metadata.Block = @ptrCast(self.metadata);
             return .{
                 .remaining_len = self.len,
-                .current_block = @bitCast(blocks[0].used()),
+                .current_block = blocks[0].used(),
             };
         }
 
@@ -1250,8 +1381,8 @@ pub fn ContextHashMap(
                 return self.cloneContext(allocator, mode, undefined);
             }
 
-            /// Reserves at least enough capacity for the given number of additional
-            /// entries.
+            /// Reserves at least enough capacity for the given number of
+            /// additional entries.
             pub fn reserve(
                 self: *Self,
                 allocator: Allocator,
@@ -1421,8 +1552,8 @@ const Metadata = packed struct(u8) {
             return if (bits == 0) null else @ctz(bits);
         }
 
-        fn used(self: Block) BitVector {
-            return self.vector < Metadata.repeat(.deleted).vector;
+        fn used(self: Block) Metadata.BitMask {
+            return @bitCast(self.vector < Metadata.repeat(.deleted).vector);
         }
 
         fn prepareRehash(self: Block) Block {
@@ -1441,13 +1572,14 @@ const Metadata = packed struct(u8) {
         }
     };
 
-    const BitVector = @Vector(Block.len, bool);
     const BitMask = std.meta.Int(.unsigned, Block.len);
 
     const empty: Metadata = .{ .hash_hint = ~@as(HashHint, 0), .free = true };
     const deleted: Metadata = .{ .hash_hint = 0, .free = true };
 
+    /// The fingerprint of the associated key's hash.
     hash_hint: HashHint,
+    /// The MSB indicating whether the slot is free or used.
     free: bool,
 
     fn repeat(self: Metadata) Metadata.Block {
@@ -1470,6 +1602,7 @@ const Metadata = packed struct(u8) {
     }
 };
 
+/// A linear probing sequence.
 const LinearProbe = struct {
     pos: usize,
 
@@ -1483,6 +1616,7 @@ const LinearProbe = struct {
     }
 };
 
+/// A triangular probing sequence.
 const TriangularProbe = struct {
     pos: usize,
     stride: usize = Metadata.Block.len,
@@ -1499,6 +1633,7 @@ const TriangularProbe = struct {
     }
 };
 
+/// A cache-line probing sequence.
 const CacheLineProbe = struct {
     pos: usize,
     origin: usize,
@@ -1649,30 +1784,6 @@ fn overflowingMul(a: usize, b: usize) Allocator.Error!usize {
     return res;
 }
 
-fn isPow2(v: usize) bool {
-    assert(v != 0);
-    return (v & (v - 1) == 0);
-}
-
-fn nextPow2(v: usize) Allocator.Error!usize {
-    if (v & (v - 1) == 0)
-        return v;
-
-    const log = log2(v);
-    if (log == @bitSizeOf(usize) - 1)
-        return error.OutOfMemory;
-    return @as(usize, 1) << (log + 1);
-}
-
-test "next power of 2" {
-    const testing = std.testing;
-    try testing.expectEqual(32, try nextPow2(17));
-    try testing.expectEqual(32, try nextPow2(31));
-    try testing.expectEqual(32, try nextPow2(32));
-    try testing.expectEqual(128, try nextPow2(128));
-    try testing.expectError(error.OutOfMemory, nextPow2(~@as(usize, 0)));
-}
-
 const Log2Int = math.Log2Int(usize);
 
 fn log2(v: usize) Log2Int {
@@ -1686,17 +1797,24 @@ fn nths(percent: u8) usize {
 }
 
 const std = @import("std");
+const debug = std.debug;
 const math = std.math;
 const mem = std.mem;
 const tt = std.testing;
 
-const assert = std.debug.assert;
+const assert = debug.assert;
 
 const Alignment = std.mem.Alignment;
 const Allocator = std.mem.Allocator;
 const Wyhash = std.hash.Wyhash;
 
-const Map = ContextHashMap(i32, i32, OneToOne, .default);
+const collections = @import("root.zig");
+
+const SafetyLock = collections.SafetyLock;
+const isPow2 = collections.isPow2;
+const nextPow2 = collections.nextPow2;
+
+const Map = HashMapContext(i32, i32, OneToOne, .default);
 const OneToOne = struct {
     pub fn hash(_: OneToOne, key: i32) u64 {
         const unsigned: u64 = @bitCast(-@as(i64, key));
@@ -1748,14 +1866,14 @@ test "entries for capacity" {
     try tt.expectEqual(64, Map.entriesForCapacity(51));
     try tt.expectEqual(64, Map.entriesForCapacity(52));
 
-    const MapLoad88 = ContextHashMap(i32, i32, struct {}, .{ .max_load_percentage = 88 });
+    const MapLoad88 = HashMapContext(i32, i32, struct {}, .{ .max_load_percentage = 88 });
     try tt.expectEqual(8, MapLoad88.load_factor_nths);
     try tt.expectEqual(128, MapLoad88.entriesForCapacity(112));
     try tt.expectEqual(256, MapLoad88.entriesForCapacity(113));
     try tt.expectEqual(112, MapLoad88.applyLoadLimit(128 - 1));
 
     // max load 100% must still reserve at least one additional entry
-    const MapLoad100 = ContextHashMap(i32, i32, struct {}, .{ .max_load_percentage = 100 });
+    const MapLoad100 = HashMapContext(i32, i32, struct {}, .{ .max_load_percentage = 100 });
     try tt.expectEqual(100, MapLoad100.load_factor_nths);
     try tt.expectEqual(16, MapLoad100.entriesForCapacity(1));
     try tt.expectEqual(16, MapLoad100.entriesForCapacity(15));
@@ -1780,6 +1898,18 @@ test "empty map get" {
     const value = map.get(1);
     try tt.expectEqual(0, map.getEntry(OneToOne.hash(.{}, 1)));
     try tt.expectEqual(null, value);
+}
+
+test "insert and contains" {
+    const allocator = tt.allocator;
+
+    var map: HashMap(u32, void, .default) = .empty;
+    defer map.deinit(allocator);
+
+    try map.insert(allocator, 1, {});
+    try tt.expectEqual(1, map.len);
+    try tt.expectEqual(true, map.contains(1));
+    try tt.expectEqual(false, map.contains(2));
 }
 
 test "reserve" {
