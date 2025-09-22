@@ -5,6 +5,7 @@ const assert = std.debug.assert;
 
 const array_list = @import("array_list.zig");
 const hash_map = @import("hash_map.zig");
+const single = @import("list/single.zig");
 
 comptime {
     _ = array_list;
@@ -21,6 +22,9 @@ pub const BoundedArrayList = array_list.BoundedArrayList;
 pub const BoundedArrayListAligned = array_list.BoundedArrayListAligned;
 pub const ArrayList = array_list.ArrayList;
 pub const ArrayListAligned = array_list.ArrayListAligned;
+
+pub const SList = single.List;
+pub const SQueue = single.Queue;
 
 pub const OOM = std.mem.Allocator.Error;
 pub const oom: OOM = error.OutOfMemory;
