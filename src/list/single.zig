@@ -39,21 +39,22 @@ pub const List = struct {
     /// The given link may be uninitialized.
     ///
     /// This operation is O(1).
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// var list: List = .empty;
-    /// var links: [2]List.Link = undefined;
-    ///
-    /// list.insertHead(&links[1]);
-    /// list.insertHead(&links[0]);
-    /// ```
     pub fn insertHead(self: *Self, link: *Self.Link) void {
         assert(!self.contains(link));
 
         link.next = self.head;
         self.head = link;
+    }
+
+    test insertHead {
+        var list: List = .empty;
+        var links: [2]List.Link = undefined;
+
+        list.insertHead(&links[1]);
+        list.insertHead(&links[0]);
+
+        try tt.expectEqual(&links[0], list.getConst(0));
+        try tt.expectEqual(&links[1], list.getConst(1));
     }
 
     /// Inserts the given link after the given predecessor link.
@@ -62,22 +63,23 @@ pub const List = struct {
     /// The given link may be uninitialized.
     ///
     /// This operation is O(n).
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// var list: List = .empty;
-    /// var links: [2]List.Link = undefined;
-    ///
-    /// list.insertHead(&links[0]);
-    /// list.insertAfter(&links[0], &links[1]);
-    /// ```
     pub fn insertAfter(self: *Self, after: *Self.Link, link: *Self.Link) void {
         assert(self.contains(after));
         assert(!self.contains(link));
 
         link.next = after.next;
         after.next = link;
+    }
+
+    test insertAfter {
+        var list: List = .empty;
+        var links: [2]List.Link = undefined;
+
+        list.insertHead(&links[0]);
+        list.insertAfter(&links[0], &links[1]);
+
+        try tt.expectEqual(&links[0], list.getConst(0));
+        try tt.expectEqual(&links[1], list.getConst(1));
     }
 
     /// Removes the head link from the list.
@@ -89,6 +91,18 @@ pub const List = struct {
 
         link.* = undefined;
         return link;
+    }
+
+    test removeHead {
+        var list: List = .empty;
+        var links: [2]List.Link = undefined;
+
+        list.insertHead(&links[1]);
+        list.insertHead(&links[0]);
+
+        try tt.expectEqual(&links[0], list.removeHead());
+        try tt.expectEqual(&links[1], list.removeHead());
+        try tt.expectEqual(null, list.removeHead());
     }
 
     /// Removes the given link from the link.
