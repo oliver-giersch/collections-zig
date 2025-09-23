@@ -19,13 +19,14 @@ pub const List = struct {
     /// The link type for connecting list items.
     pub const Link = single.Link;
 
+    /// A forward const iterator over all links in the list.
     pub const ConstIterator = GenericIterator(true);
+    /// A forward iterator over all links in the list.
     pub const Iterator = GenericIterator(false);
 
     /// The head of the list.
     head: ?*Self.Link,
 
-    // pub const isEmpty = Mixin(Self).isEmpty;
     /// Returns true if the list is empty.
     ///
     /// This operation has O(1) complexity.
@@ -111,7 +112,7 @@ pub const List = struct {
     /// Asserts that the list does not yet contain the given link.
     /// The given link may be uninitialized.
     ///
-    /// This operation is O(1).
+    /// This operation has O(1) complexity.
     pub fn insertHead(self: *Self, link: *Self.Link) void {
         assert(!self.contains(link));
 
@@ -135,7 +136,7 @@ pub const List = struct {
     /// Asserts that the list contains the predecessor but not the link itself.
     /// The given link may be uninitialized.
     ///
-    /// This operation is O(n).
+    /// This operation has O(1) complexity.
     pub fn insertAfter(self: *Self, after: *Self.Link, link: *Self.Link) void {
         assert(self.contains(after));
         assert(!self.contains(link));
