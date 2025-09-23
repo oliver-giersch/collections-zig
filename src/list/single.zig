@@ -28,9 +28,27 @@ pub const List = struct {
     pub const isEmpty = Mixin(Self).isEmpty;
     pub const contains = Mixin(Self).contains;
     pub const len = Mixin(Self).len;
+    pub const get = Mixin(Self).get;
+    pub const getConst = Mixin(Self).getConst;
     pub const constIter = Mixin(Self).constIter;
     pub const iter = Mixin(Self).iter;
 
+    /// Inserts the given link at the list's head.
+    ///
+    /// Asserts that the list does not yet contain the given link.
+    /// The given link may be uninitialized.
+    ///
+    /// This operation is O(1).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// var list: List = .empty;
+    /// var links: [2]List.Link = undefined;
+    ///
+    /// list.insertHead(&links[1]);
+    /// list.insertHead(&links[0]);
+    /// ```
     pub fn insertHead(self: *Self, link: *Self.Link) void {
         assert(!self.contains(link));
 
@@ -109,6 +127,8 @@ pub const Queue = struct {
     pub const isEmpty = Mixin(Self).isEmpty;
     pub const contains = Mixin(Self).contains;
     pub const len = Mixin(Self).len;
+    pub const get = Mixin(Self).get;
+    pub const getConst = Mixin(Self).getConst;
     pub const constIter = Mixin(Self).constIter;
     pub const iter = Mixin(Self).iter;
 
@@ -257,14 +277,25 @@ fn Mixin(comptime Self: type) type {
             return count;
         }
 
+        pub fn get(self: *Self, idx: usize) ?*Link {
+            return @constCast(self.getConst(idx));
+        }
+
+        pub fn getConst(self: *Self, idx: usize) ?*const Link {
+            var it = self.constIter();
+            for (0..idx) |_|
+                _ = it.next() orelse return null;
+            return it.next();
+        }
+
         /// Returns a constant iterator over the items in the list.
         pub fn constIter(self: *const Self) GenericIterator(true) {
-            return .{ .ptr = &self.head };
+            return .{ .link = self.head };
         }
 
         /// Returns an iterator over the items in the list.
         pub fn iter(self: *Self) GenericIterator(false) {
-            return .{ .ptr = &self.head };
+            return .{ .link = self.head };
         }
 
         fn findPrev(self: *Self, link: *const Link) *?*Link {
@@ -285,9 +316,106 @@ const assert = std.debug.assert;
 
 const tt = std.testing;
 
-test "slist insert head" {
+test "list is empty" {
     var list: List = .empty;
+    var links: [2]List.Link = undefined;
     try tt.expect(list.isEmpty());
+
+    list.head = &links[0];
+    links[0].next = &links[1];
+    links[1].next = null;
+    try tt.expect(!list.isEmpty());
+}
+
+test "list iter" {
+    var list: List = .empty;
+    var links: [2]List.Link = undefined;
+
+    list.head = &links[0];
+    links[0].next = &links[1];
+    links[1].next = null;
+
+    var it = list.iter();
+    const l0 = it.next() orelse unreachable;
+    try tt.expectEqual(&links[0], l0);
+    const l1 = it.next() orelse unreachable;
+    try tt.expectEqual(&links[1], l1);
+    try tt.expectEqual(null, it.next());
+}
+
+test "list const iter" {
+    var list: List = .empty;
+    var links: [2]List.Link = undefined;
+
+    list.head = &links[0];
+    links[0].next = &links[1];
+    links[1].next = null;
+
+    var it = list.constIter();
+    const l0 = it.next() orelse unreachable;
+    try tt.expectEqual(&links[0], l0);
+    const l1 = it.next() orelse unreachable;
+    try tt.expectEqual(&links[1], l1);
+    try tt.expectEqual(null, it.next());
+}
+
+test "list contains" {
+    var list: List = .empty;
+    var links: [2]List.Link = undefined;
+
+    list.head = &links[0];
+    links[0].next = &links[1];
+    links[1].next = null;
+
+    try tt.expect(list.contains(&links[0]));
+    try tt.expect(list.contains(&links[1]));
+}
+
+test "list len" {
+    var list: List = .empty;
+    var links: [2]List.Link = undefined;
+
+    list.head = &links[0];
+    links[0].next = &links[1];
+    links[1].next = null;
+
+    try tt.expectEqual(2, list.len());
+}
+
+test "get" {
+    var list: List = .empty;
+    var links: [4]List.Link = undefined;
+
+    list.insertHead(&links[0]);
+    list.insertAfter(&links[0], &links[1]);
+    list.insertAfter(&links[1], &links[2]);
+    list.insertAfter(&links[2], &links[3]);
+
+    try tt.expectEqual(&links[0], list.get(0));
+    try tt.expectEqual(&links[1], list.get(1));
+    try tt.expectEqual(&links[2], list.get(2));
+    try tt.expectEqual(&links[3], list.get(3));
+    try tt.expectEqual(null, list.get(4));
+}
+
+test "get const" {
+    var list: List = .empty;
+    var links: [4]List.Link = undefined;
+
+    list.insertHead(&links[0]);
+    list.insertAfter(&links[0], &links[1]);
+    list.insertAfter(&links[1], &links[2]);
+    list.insertAfter(&links[2], &links[3]);
+
+    try tt.expectEqual(&links[0], list.getConst(0));
+    try tt.expectEqual(&links[1], list.getConst(1));
+    try tt.expectEqual(&links[2], list.getConst(2));
+    try tt.expectEqual(&links[3], list.getConst(3));
+    try tt.expectEqual(null, list.getConst(4));
+}
+
+test "list insert head" {
+    var list: List = .empty;
     var links: [2]List.Link = undefined;
 
     list.insertHead(&links[0]);
@@ -297,7 +425,29 @@ test "slist insert head" {
     try tt.expect(list.contains(&links[1]));
 }
 
-test "squeue remove" {
+test "list insert after" {
+    var list: List = .empty;
+    var links: [4]List.Link = undefined;
+
+    list.insertHead(&links[0]);
+    list.insertAfter(&links[0], &links[1]);
+    list.insertAfter(&links[1], &links[2]);
+    list.insertAfter(&links[2], &links[3]);
+
+    var it = list.constIter();
+    const l0 = it.next() orelse unreachable;
+    const l1 = it.next() orelse unreachable;
+    const l2 = it.next() orelse unreachable;
+    const l3 = it.next() orelse unreachable;
+    try tt.expectEqual(null, it.next());
+
+    try tt.expectEqual(l0, &links[0]);
+    try tt.expectEqual(l1, &links[1]);
+    try tt.expectEqual(l2, &links[2]);
+    try tt.expectEqual(l3, &links[3]);
+}
+
+test "queue remove" {
     var queue: Queue = undefined;
     queue.empty();
     var links: [2]Queue.Link = undefined;
