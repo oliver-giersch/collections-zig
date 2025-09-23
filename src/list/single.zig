@@ -25,13 +25,44 @@ pub const List = struct {
     /// The head of the list.
     head: ?*Self.Link,
 
-    pub const isEmpty = Mixin(Self).isEmpty;
-    pub const contains = Mixin(Self).contains;
-    pub const len = Mixin(Self).len;
-    pub const get = Mixin(Self).get;
-    pub const getConst = Mixin(Self).getConst;
-    //pub const constIter = Mixin(Self).constIter;
-    //pub const iter = Mixin(Self).iter;
+    // pub const isEmpty = Mixin(Self).isEmpty;
+    /// Returns true if the list is empty.
+    ///
+    /// This operation has O(1) complexity.
+    pub fn isEmpty(self: *const Self) bool {
+        return Mixin(Self).isEmpty(self);
+    }
+
+    /// Returns true if the list contains the given link.
+    ///
+    /// This operation has O(n) complexity in the worst case.
+    pub fn contains(self: *const Self, link: *const Self.Link) bool {
+        return Mixin(Self).contains(self, link);
+    }
+
+    /// Returns the length of the list.
+    ///
+    /// Consider storing and maintaining the length separately, if it is
+    /// needed frequently.
+    ///
+    /// This operation has O(n) complexity.
+    pub fn len(self: *const Self) usize {
+        return Mixin(Self).len(self);
+    }
+
+    /// Returns the link at the given index.
+    ///
+    /// This operation has O(n) complexity in the worst case.
+    pub fn get(self: *Self, idx: usize) ?*Self.Link {
+        return Mixin(Self).get(self, idx);
+    }
+
+    /// Returns the link at the given index.
+    ///
+    /// This operation has O(n) complexity in the worst case.
+    pub fn getConst(self: *const Self, idx: usize) ?*const Self.Link {
+        return Mixin(Self).getConst(self, idx);
+    }
 
     /// Returns an iterator over the items in the list.
     pub fn iter(self: *Self) Iterator {
@@ -126,7 +157,7 @@ pub const List = struct {
 
     /// Removes the head link from the list.
     ///
-    /// This operation is O(1).
+    /// This operation has O(1) complexity.
     pub fn removeHead(self: *Self) ?*Self.Link {
         const link = self.head orelse return null;
         self.head = link.next;
@@ -147,17 +178,52 @@ pub const List = struct {
         try tt.expectEqual(null, list.removeHead());
     }
 
+    /// Removes and returns the link after the given link.
+    ///
+    /// This operation has O(1) complexity.
+    pub fn removeAfter(self: *Self, after: *Self.Link) ?*Self.Link {
+        assert(self.contains(after));
+
+        const link = after.next orelse return null;
+        after.next = link.next;
+        link.* = undefined;
+
+        return link;
+    }
+
+    test removeAfter {
+        var list: List = .empty;
+        var links: [2]List.Link = undefined;
+
+        list.insertHead(&links[1]);
+        list.insertHead(&links[0]);
+
+        try tt.expectEqual(&links[1], list.removeAfter(&links[0]));
+    }
+
     /// Removes the given link from the link.
     ///
     /// Asserts that the link is contained in the list.
     ///
-    /// This operation is O(n) in the worst case.
+    /// This operation has O(n) complexity in the worst case.
     pub fn remove(self: *Self, link: *Self.Link) void {
         assert(self.contains(link));
 
         const prev = Mixin(Self).findPrev(self, link);
-        prev.next = link.next;
+        prev.* = link.next;
         link.* = undefined;
+    }
+
+    test remove {
+        var list: List = .empty;
+        var links: [2]List.Link = undefined;
+
+        list.insertHead(&links[1]);
+        list.insertHead(&links[0]);
+
+        list.remove(&links[0]);
+        try tt.expect(!list.contains(&links[0]));
+        try tt.expect(list.contains(&links[1]));
     }
 };
 
@@ -188,7 +254,7 @@ pub const Queue = struct {
     pub const constIter = Mixin(Self).constIter;
     pub const iter = Mixin(Self).iter;
 
-    /// Appends the given list to the tail of this list.
+    /// Appends the given list to this list's tail.
     pub fn concat(self: *Self, other: *const Self) void {
         if (other.isEmpty()) {
             @branchHint(.unlikely);
@@ -289,6 +355,10 @@ fn GenericIterator(comptime is_const: bool) type {
         }
 
         /// Returns the next item in the iterator sequence.
+        ///
+        /// The iterator does not depend on items once they have been returned
+        /// by it, meaning callers are free to handle them as they see fit,
+        /// including removing them and freeing their memory.
         pub fn next(self: *Self) ?Item {
             const link = self.peekNext() orelse return null;
             self.link = link.next;
@@ -299,17 +369,11 @@ fn GenericIterator(comptime is_const: bool) type {
 
 fn Mixin(comptime Self: type) type {
     return struct {
-        /// Returns true if the list is empty.
-        ///
-        /// This operation is O(1).
-        pub fn isEmpty(self: *const Self) bool {
+        fn isEmpty(self: *const Self) bool {
             return self.head == null;
         }
 
-        /// Returns true if the list contains the given link.
-        ///
-        /// This operation is O(n) in the worst case.
-        pub fn contains(self: *const Self, link: *const Link) bool {
+        fn contains(self: *const Self, link: *const Link) bool {
             var it = self.constIter();
             while (it.next()) |curr| {
                 if (curr == link)
@@ -319,11 +383,7 @@ fn Mixin(comptime Self: type) type {
             return false;
         }
 
-        /// Returns the length of the list.
-        ///
-        /// This operation is O(n). Consider storing and maintaining the length
-        /// separately, if it is needed frequently.
-        pub fn len(self: *const Self) usize {
+        fn len(self: *const Self) usize {
             var it = self.constIter();
             var count: usize = 0;
             while (it.next()) |_| {
@@ -333,28 +393,26 @@ fn Mixin(comptime Self: type) type {
             return count;
         }
 
-        pub fn get(self: *Self, idx: usize) ?*Link {
+        fn get(self: *Self, idx: usize) ?*Link {
             return @constCast(self.getConst(idx));
         }
 
-        pub fn getConst(self: *Self, idx: usize) ?*const Link {
+        fn getConst(self: *Self, idx: usize) ?*const Link {
             var it = self.constIter();
             for (0..idx) |_|
                 _ = it.next() orelse return null;
             return it.next();
         }
 
-        /// Returns a constant iterator over the items in the list.
-        pub fn constIter(self: *const Self) GenericIterator(true) {
+        fn constIter(self: *const Self) GenericIterator(true) {
             return .{ .link = self.head };
         }
 
-        /// Returns an iterator over the items in the list.
-        pub fn iter(self: *Self) GenericIterator(false) {
+        fn iter(self: *Self) GenericIterator(false) {
             return .{ .link = self.head };
         }
 
-        fn findPrev(self: *Self, link: *const Link) *?*Link {
+        fn findPrev(self: *Self, link: *Link) *?*Link {
             var prev: *?*Link = &self.head;
             while (prev.*) |curr| {
                 if (curr == link)
@@ -413,6 +471,34 @@ test "list const iter" {
     const l1 = it.next() orelse unreachable;
     try tt.expectEqual(&links[1], l1);
     try tt.expectEqual(null, it.next());
+}
+
+test "list iter remove and free" {
+    const allocator = tt.allocator;
+
+    var list: List = .empty;
+    var links: [4]*List.Link = undefined;
+
+    for (&links) |*link|
+        link.* = try allocator.create(List.Link);
+
+    list.insertHead(links[3]);
+    list.insertHead(links[2]);
+    list.insertHead(links[1]);
+    list.insertHead(links[0]);
+
+    var it = list.iter();
+    var i: usize = 0;
+
+    while (it.next()) |link| {
+        try tt.expectEqual(links[i], link);
+        list.remove(link);
+        allocator.destroy(link);
+        i += 1;
+    }
+
+    try tt.expectEqual(0, list.len());
+    try tt.expect(list.isEmpty());
 }
 
 test "list contains" {
