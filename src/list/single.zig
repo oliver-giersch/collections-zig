@@ -30,8 +30,50 @@ pub const List = struct {
     pub const len = Mixin(Self).len;
     pub const get = Mixin(Self).get;
     pub const getConst = Mixin(Self).getConst;
-    pub const constIter = Mixin(Self).constIter;
-    pub const iter = Mixin(Self).iter;
+    //pub const constIter = Mixin(Self).constIter;
+    //pub const iter = Mixin(Self).iter;
+
+    /// Returns an iterator over the items in the list.
+    pub fn iter(self: *Self) Iterator {
+        return Mixin(Self).iter(self);
+    }
+
+    test iter {
+        var list: List = .empty;
+        var links: [2]List.Link = undefined;
+
+        list.insertHead(&links[1]);
+        list.insertHead(&links[0]);
+
+        var it = list.iter();
+        var i: usize = 0;
+
+        while (it.next()) |link| {
+            try tt.expectEqual(&links[i], link);
+            i += 1;
+        }
+    }
+
+    /// Returns a constant iterator over the items in the list.
+    pub fn constIter(self: *const Self) ConstIterator {
+        return Mixin(Self).constIter(self);
+    }
+
+    test constIter {
+        var list: List = .empty;
+        var links: [2]List.Link = undefined;
+
+        list.insertHead(&links[1]);
+        list.insertHead(&links[0]);
+
+        var it = list.constIter();
+        var i: usize = 0;
+
+        while (it.next()) |link| {
+            try tt.expectEqual(&links[i], link);
+            i += 1;
+        }
+    }
 
     /// Inserts the given link at the list's head.
     ///
