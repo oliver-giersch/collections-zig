@@ -82,6 +82,7 @@ pub const Options = struct {
         multi_array,
     };
 
+    /// The probing strategy for resolving hash collisions.
     pub const ProbingStrategy = enum {
         linear,
         triangular,
@@ -103,6 +104,7 @@ pub const CloneMode = enum {
     rehash,
 };
 
+/// The integer type expected as output from hashing functions.
 pub const Hash = u64;
 
 /// An unmanaged hash map with explicit hash and equality context.
@@ -365,8 +367,7 @@ pub fn HashMapContext(
             }
         };
 
-        // The abstraction for the probing sequence selected through comptime
-        // configuration.
+        // The abstraction for the comptime-selected probing strategy.
         const Probe = switch (options.probing_strategy) {
             .linear => LinearProbe,
             .triangular => TriangularProbe,
@@ -495,8 +496,45 @@ pub fn HashMapContext(
             self.len = 0;
         }
 
+        /// Returns a pointer to the value associated with the given key.
+        ///
+        /// This is the fastest way to retrieve a value for a key, since it does
+        /// not involve any hashing or probing, but it comes with a number of
+        /// restrictions.
+        ///
+        /// The given key pointer must be a valid pointer to a key currently
+        /// managed by the hash map, such as those returned by the various
+        /// iterators or `get`/`getConst` methods.
+        ///
+        /// Any pointers to keys or values managed by the hash map **only**
+        /// remain valid as long as the map itself is not resized or rehashed.
+        ///
+        /// The `pointer_stability` lock may be used to enforce this in
+        /// safety-checked builds.
+        /// Furthermore, the `reserve` may be the used to ensure that the
+        /// subsequent N insertions to cause the hash map to be resized.
         pub fn getByPtr(self: *Self, key: *const Key) *Value {
             return @constCast(self.getConstByPtr(key));
+        }
+
+        test getByPtr {
+            var map: AutoHashMap(i32, i32, .default) = .empty;
+            try map.reserve(tt.allocator, 4);
+
+            map.pointer_stability.lock();
+            defer map.pointer_stability.unlock();
+
+            // at least 4 insertions are possible without needing reallocation.
+            map.insertUnchecked(1, 2);
+            map.insertUnchecked(2, 4);
+            map.insertUnchecked(3, 6);
+            map.insertUnchecked(4, 8);
+
+            var it = map.keyIter();
+            while (it.next()) |key| {
+                const value = map.getConstByPtr(key).*;
+                try tt.expectEqual(2 * key.*, value);
+            }
         }
 
         pub fn getConstByPtr(self: *const Self, key: *const Key) *const Value {
@@ -838,6 +876,7 @@ pub fn HashMapContext(
             zst_ctx.getOrInsertKeyUnchecked
         else {};
 
+        /// Returns....
         pub fn getOrInsertContext(
             self: *Self,
             allocator: Allocator,
