@@ -10,6 +10,9 @@ const single = @This();
 /// initialize any link that is inserted.
 /// All removal methods must be assumed to uninitialize the contents of the
 /// removed links but not the containing structures.
+///
+/// The user is entirely responsible for managing the lifetime of list links.
+/// Each link must live for at least as long as it is part of the list.
 pub const List = struct {
     const Self = @This();
 
@@ -41,7 +44,7 @@ pub const List = struct {
         return Mixin(Self).contains(self, link);
     }
 
-    /// Returns the length of the list.
+    /// Returns the list's length.
     ///
     /// Consider storing and maintaining the length separately, if it is
     /// needed frequently.
@@ -398,7 +401,7 @@ fn Mixin(comptime Self: type) type {
             return @constCast(self.getConst(idx));
         }
 
-        fn getConst(self: *Self, idx: usize) ?*const Link {
+        fn getConst(self: *const Self, idx: usize) ?*const Link {
             var it = self.constIter();
             for (0..idx) |_|
                 _ = it.next() orelse return null;
