@@ -13,11 +13,12 @@ pub const List = extern struct {
     fn GenericIterator(comptime is_const: bool) type {
         return struct {
             pub const Item = if (is_const) *const Self.Link else *Self.Link;
+
             const ItemPointer = if (is_const) *const ?*Self.Link else *?*Self.Link;
 
             ptr: ItemPointer,
 
-            pub fn peekNext(self: *@This()) ?Item {
+            pub fn peekNext(self: *const @This()) ?Item {
                 return self.ptr.*;
             }
 
@@ -27,7 +28,7 @@ pub const List = extern struct {
                 return link;
             }
 
-            pub fn peekPrev(self: *@This(), head: *const ?*Self.Link) ?Item {
+            pub fn peekPrev(self: *const @This(), head: *const ?*Self.Link) ?Item {
                 if (self.ptr == head)
                     return null;
 
@@ -45,9 +46,19 @@ pub const List = extern struct {
 
     head: ?*Self.Link,
 
-    pub const isEmpty = Mixin(Self).isEmpty;
-    pub const contains = Mixin(Self).contains;
-    pub const len = Mixin(Self).len;
+    /// Returns true if the queue is empty.
+    ///
+    /// This operation has O(1) complexity.
+    pub fn isEmpty(self: *const Self) bool {
+        return Mixin(Self).isEmpty(self);
+    }
+
+    /// Returns true if the queue contains the given link.
+    ///
+    /// This operation has O(n) complexity in the worst case.
+    pub fn contains(self: *const Self, link: *const Self.Link) bool {
+        return Mixin(Self).contains(self, link);
+    }
 
     pub fn constIter(self: *const Self) ConstIterator {
         return .{ .ptr = &self.head };
@@ -124,26 +135,13 @@ pub const Queue = extern struct {
     /// The link type for connecting queue items.
     pub const Link = double.Link;
 
-    // double link dilemma
-    // safe iterator: does not allow reverse iteration/removal/insertion
-    // bidirectional iterator: does not allow invalidation (needs to maintain prev pointers)
-
-    // const     safe-forward
-    // non-const safe-forward
-    // const     safe-reverse
-    // non-const safe-reverve
-
-    // cursor abstraction? allows removal/insertion while remaining valid?
-
-    // iterator state:
-    //  - current link pointer (starts at head, ends at null)
-    //  - current link's next pointer (starts at &head)
-    //
-    // 1) + does not depend on once-returned links, composes well with list ops
-    //    - once end is reached, reverse iteration is impossible? (unless we dont advance onto null)
-    // 2) + allows seamless forward/reverse iteration
+    pub const ConstForwardIterator = GenericIterator(.forward, true);
+    pub const ForwardIterator = GenericIterator(.forward, false);
+    pub const ConstReverseIterator = GenericIterator(.reverse, true);
+    pub const ReverseIterator = GenericIterator(.reverse, false);
 
     pub const Cursor = struct {
+        queue: *Queue,
         ptr: *?*Self.Link,
 
         pub fn peekNext(self: *Cursor) ?*Self.Link {
@@ -156,10 +154,32 @@ pub const Queue = extern struct {
             return link;
         }
 
-        pub fn prev(self: *Cursor) ?*Self.Link {
-            const link = getLink(self.ptr) orelse return null;
-            self.ptr = link.prev;
-            return link;
+        test moveNext {
+            var queue: Queue = undefined;
+            queue.empty();
+
+            var links: [4]Queue.Link = undefined;
+            for (&links) |link|
+                queue.insertTail(link);
+
+            var cur = queue.cursor();
+            try tt.expectEqual(&links[0], cur.moveNext());
+            try tt.expectEqual(&links[1], cur.moveNext());
+            try tt.expectEqual(&links[2], cur.moveNext());
+            try tt.expectEqual(&links[3], cur.moveNext());
+            try tt.expectEqual(null, cur.moveNext());
+        }
+
+        pub fn insertNext(self: *Cursor, link: *Self.Link) void {
+            assert(!self.queue.contains(link));
+
+            link.next = self.peekNext();
+            link.prev = self.ptr;
+            self.ptr.* = link;
+            if (link.next == null) {
+                @branchHint(.unlikely);
+                self.queue.tail = &link.next;
+            }
         }
 
         pub fn removeNext(self: *Cursor) ?*Self.Link {
@@ -168,14 +188,29 @@ pub const Queue = extern struct {
             if (link.next) |next| {
                 @branchHint(.likely);
                 next.prev = self.ptr;
+            } else {
+                self.queue.tail = self.ptr;
             }
 
             link.* = undefined;
             return link;
         }
+
+        pub fn peekPrev(self: *const Cursor) ?*Self.Link {
+            return getLink(self.ptr) orelse return null;
+        }
+
+        pub fn movePrev(self: *Cursor) ?*Self.Link {
+            const link = self.peekPrev() orelse return null;
+            self.ptr = link.prev;
+            return link;
+        }
     };
 
-    fn GenericIterator(comptime is_const: bool, comptime is_forward: bool) type {
+    fn GenericIterator(
+        comptime direction: enum { forward, reverse },
+        comptime is_const: bool,
+    ) type {
         return struct {
             pub const Item = if (is_const) *const Self.Link else *Self.Link;
 
@@ -187,7 +222,7 @@ pub const Queue = extern struct {
 
             pub fn next(self: *@This()) ?Item {
                 const link = self.peekNext() orelse return null;
-                self.link = if (comptime is_forward) link.next else getLink(link.prev);
+                self.link = if (comptime direction == .forward) link.next else getLink(link.prev);
                 return link;
             }
         };
@@ -233,6 +268,35 @@ pub const Queue = extern struct {
         return Mixin(Self).len(self);
     }
 
+    pub fn constIter(self: *const Self) ConstForwardIterator {
+        return .{ .link = self.head };
+    }
+
+    pub fn iter(self: *Self) ForwardIterator {
+        return .{ .link = self.head };
+    }
+
+    pub fn constReverseIter(self: *const Self) ConstReverseIterator {
+        return .{ .link = getLink(self.tail) };
+    }
+
+    pub fn reverseIter(self: *Self) ReverseIterator {
+        return .{ .link = getLink(self.tail) };
+    }
+
+    pub fn cursor(self: *Self) Cursor {
+        return .{ .ptr = &self.head, .queue = self };
+    }
+
+    pub fn insertTail(self: *Self, link: *Self.Link) void {
+        assert(!self.contains(link));
+
+        link.next = null;
+        link.prev = self.tail;
+        self.tail.* = link;
+        self.tail = &link.next;
+    }
+
     pub fn insertAfter(self: *Self, after: *Self.Link, link: *Self.Link) void {
         assert(self.contains(after));
         assert(!self.contains(link));
@@ -244,6 +308,16 @@ pub const Queue = extern struct {
             @branchHint(.likely);
             next.prev = &link.next;
         }
+    }
+
+    pub fn insertBefore(self: *Self, before: *Self.Link, link: *Self.Link) void {
+        assert(self.contains(before));
+        assert(!self.contains(link));
+
+        link.next = before;
+        link.prev = before.prev;
+        before.prev.* = link;
+        before.prev = &link.next;
     }
 
     pub fn removeAfter(self: *Self, after: *Self.Link) ?*Self.Link {
@@ -344,3 +418,27 @@ fn Mixin(comptime Self: type) type {
 
 const std = @import("std");
 const assert = std.debug.assert;
+
+const tt = std.testing;
+
+test "queue cursor" {
+    var queue: Queue = undefined;
+    var links: [4]Queue.Link = undefined;
+    queue.empty();
+
+    for (&links) |*link|
+        queue.insertTail(link);
+
+    var cur = queue.cursor();
+    try tt.expectEqual(&links[0], cur.moveNext());
+    try tt.expectEqual(&links[1], cur.moveNext());
+    try tt.expectEqual(&links[2], cur.moveNext());
+    try tt.expectEqual(&links[3], cur.moveNext());
+    try tt.expectEqual(null, cur.moveNext());
+    try tt.expectEqual(&links[3], cur.movePrev());
+    try tt.expectEqual(&links[2], cur.movePrev());
+    try tt.expectEqual(&links[1], cur.movePrev());
+    try tt.expectEqual(&links[0], cur.movePrev());
+    try tt.expectEqual(null, cur.movePrev());
+    try tt.expectEqual(&links[0], cur.moveNext());
+}
