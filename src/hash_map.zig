@@ -65,8 +65,9 @@ pub fn autoHashFn(comptime C: type, comptime T: type) (fn (C, T) Hash) {
 /// for allocation-less hash maps.
 var empty_vector: Metadata.Block = Metadata.repeat(.empty);
 
-/// The configuration options for the HashMap type.
+/// The comptime configuration options for the HashMap type.
 pub const Options = struct {
+    /// The default options best suited for most use cases.
     pub const default: Options = .{};
 
     /// The data layout for keys and values within the hash map.
@@ -77,7 +78,20 @@ pub const Options = struct {
     /// and values would otherwise cause padding bytes to be inserted between
     /// them.
     pub const Layout = enum {
+        /// Decide the layout automatically based space efficiency.
+        ///
+        /// If storing the keys and values alongside each other would waste
+        /// (memory) space because of padding, this selects the `.multi_array`
+        /// layout.
+        /// For equally sized/aligned keys and values, this selects the `.array`
+        /// layout.
         auto,
+        /// The Single-array layout stores keys and values next to each other
+        /// within a single array.
+        /// With this layout, key-value lookups are more likely to access only a
+        /// single cache line.
+        /// On the other hand, padding bytes due to differing key/value size or
+        /// alignment may waste space and reduce overall cache-efficiency.
         array,
         multi_array,
     };
@@ -97,10 +111,30 @@ pub const Options = struct {
     max_load_percentage: u8 = 88, // round-up from 87.5, i.e. 1/8th
 };
 
+/// The strategy for cloning the contents of a map.
+///
+/// During the lifecycle of a hash map, as entries get inserted and deleted,
+/// certain entries in the map are going to become irretrivably lost, i.e.
+/// non-reusable, reducing the available capacity.
+/// These will become free again, whenever the map is resized or rehashed.
+///
+/// When cloning a map, the caller has the choice to either copy its memory
+/// is-as, i.e. including all deleted and unusable entries or to rehash every
+/// entry and insert it into a clean slate map.
+///
+/// The former is faster, since it does not require any hashing, but may be less
+/// efficient in the long run, if copies a large number of deleted entries.
+/// This may result in having to resize the cloned map prematurely or more
+/// expensive look-ups due to more complicated probing sequences.
+///
+/// For maps that never had any entries removed from them, the former option is
+/// always better and preferrable.
 pub const CloneMode = enum {
     pub const default: CloneMode = .memcpy;
 
+    /// Copy the contents of the map 1:1.
     memcpy,
+    /// Rehash every entry in the source map and insert it into the clone.
     rehash,
 };
 
@@ -159,10 +193,11 @@ pub fn HashMapContext(
 
         fn GenericIterator(comptime is_const: bool) type {
             return struct {
+                /// The key-value pair type returned by each iteration.
                 pub const Entry = if (is_const)
                     struct { key: *const Key, value: *const Value }
                 else
-                    struct { key: *Key, value: *Value };
+                    struct { key: *const Key, value: *Value };
                 const MapPointer = if (is_const) *const Self else *Self;
 
                 /// The parent hash map.
@@ -175,16 +210,11 @@ pub fn HashMapContext(
                 /// The entries are iterated in no particular order.
                 pub fn next(self: *@This()) ?@This().Entry {
                     const entry_idx = self.it.next(self.map) orelse return null;
+                    const key = self.map.getConstKey(entry_idx);
                     return if (comptime is_const)
-                        .{
-                            .key = self.map.getConstKey(entry_idx),
-                            .value = self.map.getConstValue(entry_idx),
-                        }
+                        .{ .key = key, .value = self.map.getConstValue(entry_idx) }
                     else
-                        .{
-                            .key = self.map.getKey(entry_idx),
-                            .value = self.map.getValue(entry_idx),
-                        };
+                        .{ .key = key, .value = self.map.getValue(entry_idx) };
                 }
             };
         }
@@ -211,7 +241,8 @@ pub fn HashMapContext(
             };
         }
 
-        const EntryIterator = struct {
+        /// An unordered iterator over populated hash map buffer indices.
+        pub const EntryIterator = struct {
             remaining_len: usize,
             entry_idx: usize = 0,
             current_block: Metadata.BitMask = 0,
@@ -233,11 +264,6 @@ pub fn HashMapContext(
                     return self.entry_idx + bit;
                 }
             }
-        };
-
-        pub const KeyValue = struct {
-            key: Key,
-            value: Value,
         };
 
         /// The result of a `getOrInsert` method call.
@@ -367,6 +393,11 @@ pub fn HashMapContext(
             }
         };
 
+        const KeyValue = struct {
+            key: Key,
+            value: Value,
+        };
+
         // The abstraction for the comptime-selected probing strategy.
         const Probe = switch (options.probing_strategy) {
             .linear => LinearProbe,
@@ -454,27 +485,27 @@ pub fn HashMapContext(
             self.* = undefined;
         }
 
-        /// Returns an iterator over all key-value pairs by pointer.
+        /// Returns an unordered iterator over all key-value pairs by pointer.
         pub fn iter(self: *Self) Iterator {
             return .{ .map = self, .it = self.entryIter() };
         }
 
-        /// Returns an iterator over all key-value pairs by pointer.
+        /// Returns an unordered iterator over all key-value pairs by pointer.
         pub fn constIter(self: *const Self) ConstIterator {
             return .{ .map = self, .it = self.entryIter() };
         }
 
-        /// Returns an iterator over all values by pointer.
+        /// Returns an unordered iterator over all values by pointer.
         pub fn valueIter(self: *Self) ValueIterator {
             return .{ .map = self, .it = self.entryIter() };
         }
 
-        /// Returns an iterator over all values by pointer.
+        /// Returns an unordered iterator over all values by pointer.
         pub fn constValueIter(self: *const Self) ConstValueIterator {
             return .{ .map = self, .it = self.entryIter() };
         }
 
-        /// Returns an iterator over all keys by pointer.
+        /// Returns an unordered iterator over all keys by pointer.
         pub fn keyIter(self: *const Self) KeyIterator {
             return .{ .map = self, .it = self.entryIter() };
         }
@@ -490,6 +521,8 @@ pub fn HashMapContext(
                 return;
             }
 
+            // Reset all metadata slots, restore original capacity
+            // and set length to zero.
             const metadata = self.getMetadataBlocks();
             @memset(metadata, Metadata.repeat(.empty));
             self.remaining_capacity = self.getUsableCapacity();
@@ -537,6 +570,9 @@ pub fn HashMapContext(
             }
         }
 
+        /// Returns a const pointer to the value associated with the given key.
+        ///
+        /// C.f. `getByPtr` for further information.
         pub fn getConstByPtr(self: *const Self, key: *const Key) *const Value {
             const buffer = self.getBuffer() orelse unreachable;
             const entry_idx: usize = if (comptime multi_array)
@@ -560,10 +596,6 @@ pub fn HashMapContext(
         /// The given mode specifies, whether the map is cloned as-is (using a
         /// memcpy) or by rehashing, meaning the every key-value pair is hashed
         /// and inserted again.
-        ///
-        /// The second mode is preferrable, if the map was used very dynamically
-        /// prior to being cloned, with frequent and intermixed insertions and
-        /// deletions, leading to
         pub fn cloneContext(
             self: *const Self,
             allocator: Allocator,
@@ -610,6 +642,9 @@ pub fn HashMapContext(
 
         /// Reserves at least enough capacity for the given number of additional
         /// entries.
+        ///
+        /// Does nothing, if there already is sufficient capacity and fails, if
+        /// the allocator fails to resize or reallocate the backing buffer.
         pub fn reserveContext(
             self: *Self,
             allocator: Allocator,
@@ -656,7 +691,7 @@ pub fn HashMapContext(
             zst_ctx.contains
         else {};
 
-        /// Returns a pointer to the value for the given key.
+        /// Returns a const pointer to the value for the given key.
         pub fn getConstPtrContext(
             self: *const Self,
             key: Key,
@@ -696,8 +731,8 @@ pub fn HashMapContext(
             zst_ctx.get
         else {};
 
-        /// Inserts the given key-value pair, silently overwriting the previous
-        /// value associated with the key, if any.
+        /// Inserts the given key-value pair, silently overwriting the
+        /// previous value associated to that key, if there is one.
         pub fn insertContext(
             self: *Self,
             allocator: Allocator,
@@ -713,7 +748,7 @@ pub fn HashMapContext(
         else {};
 
         /// Inserts the given key-value pair, silently overwriting the previous
-        /// value associated with the key, if any.
+        /// value associated with the key, if there is one.
         ///
         /// Asserts that there is available capacity.
         pub fn insertUncheckedContext(
@@ -729,8 +764,8 @@ pub fn HashMapContext(
             zst_ctx.insertUnchecked
         else {};
 
-        /// Inserts the given key-value pair and returns the previous value
-        /// associated with the key, if any.
+        /// Inserts the given key-value pair and returns a copy of the previous
+        /// value associated with the key, if there is one.
         pub fn insertFetchContext(
             self: *Self,
             allocator: Allocator,
@@ -756,8 +791,8 @@ pub fn HashMapContext(
             zst_ctx.insertFetch
         else {};
 
-        /// Inserts the given key-value pair and returns the previous value
-        /// associated with the key, if any.
+        /// Inserts the given key-value pair and returns a copy of the previous
+        /// value associated with the key, if there is one.
         ///
         /// Asserts, that there is capacity available.
         pub fn insertFetchUncheckedContext(
@@ -923,7 +958,9 @@ pub fn HashMapContext(
         else {};
 
         /// Removes the given key and its associated value and returns the
-        /// removed value, if any.
+        /// removed value, if there is one.
+        ///
+        /// This may or may not increase the available capacity by one.
         pub fn removeFetchContext(self: *Self, key: Key, ctx: Context) ?Value {
             const hash, const hint = hashKey(key, ctx);
             var probe = self.probeHash(hash);
@@ -1423,6 +1460,11 @@ pub fn HashMapContext(
 
         const is_zst_ctx = @sizeOf(Context) == 0;
         const zst_ctx = struct {
+            /// Clones the hash map and returns the clone.
+            ///
+            /// The given mode specifies, whether the map is cloned as-is (using a
+            /// memcpy) or by rehashing, meaning the every key-value pair is hashed
+            /// and inserted again.
             pub fn clone(
                 self: *const Self,
                 allocator: Allocator,
@@ -1431,8 +1473,11 @@ pub fn HashMapContext(
                 return self.cloneContext(allocator, mode, undefined);
             }
 
-            /// Reserves at least enough capacity for the given number of
-            /// additional entries.
+            /// Reserves at least enough capacity for the given number of additional
+            /// entries.
+            ///
+            /// Does nothing, if there already is sufficient capacity and fails, if
+            /// the allocator fails to resize or reallocate the backing buffer.
             pub fn reserve(
                 self: *Self,
                 allocator: Allocator,
@@ -1441,15 +1486,12 @@ pub fn HashMapContext(
                 return self.reserveContext(allocator, count, undefined);
             }
 
+            /// Rehashes all key-value pairs inplace, without reallocating.
+            ///
+            /// This clears up any locked up capacity from deleted entries, that
+            /// could otherwise not be reused.
             pub fn rehash(self: *Self) void {
                 return self.rehashContext(undefined);
-            }
-
-            pub fn cloneContext(
-                self: *const Self,
-                allocator: Allocator,
-            ) OOM!Self {
-                return self.cloneContext(allocator, undefined);
             }
 
             /// Returns true, if the map contains the given key.
@@ -1457,7 +1499,7 @@ pub fn HashMapContext(
                 return self.containsContext(key, undefined);
             }
 
-            /// Returns a pointer to the value for the given key.
+            /// Returns a const pointer to the value for the given key.
             pub fn getConstPtr(self: *const Self, key: Key) ?*const Value {
                 return self.getConstPtrContext(key, undefined);
             }
@@ -1472,8 +1514,8 @@ pub fn HashMapContext(
                 return self.getContext(key, undefined);
             }
 
-            /// Inserts the given key-value pair, overwriting the previous
-            /// value associated to that key, if any.
+            /// Inserts the given key-value pair, silently overwriting the
+            /// previous value associated to that key, if there is one.
             pub fn insert(
                 self: *Self,
                 allocator: Allocator,
@@ -1483,8 +1525,8 @@ pub fn HashMapContext(
                 return self.insertContext(allocator, key, value, undefined);
             }
 
-            /// Inserts the given key-value pair, overwriting the previous
-            /// value associated to that key, if any.
+            /// Inserts the given key-value pair, silently overwriting the
+            /// previous value associated with the key, if there is one.
             ///
             /// Asserts that there is available capacity.
             pub fn insertUnchecked(self: *Self, key: Key, value: Value) void {
@@ -1492,7 +1534,7 @@ pub fn HashMapContext(
             }
 
             /// Inserts the given key-value pair and returns a copy of the
-            /// previous value for that key, if any.
+            /// previous value associated with the key, if there is one
             pub fn insertFetch(
                 self: *Self,
                 allocator: Allocator,
@@ -1503,7 +1545,7 @@ pub fn HashMapContext(
             }
 
             /// Inserts the given key-value pair and returns a copy of the
-            /// previous value for that key, if any.
+            /// previous value associated with the key, if there is one.
             ///
             /// Asserts, that there is capacity available.
             pub fn insertFetchUnchecked(
@@ -1581,11 +1623,12 @@ pub fn HashMapContext(
     };
 }
 
+/// The metadata slot for a key-value entry.
 const Metadata = packed struct(u8) {
     const HashHint = u7;
 
     const Block = extern struct {
-        const len = 16; // FIXME: only 16 for SSE2
+        const len = blockSize(builtin.cpu);
         const mask = len - 1;
 
         vector: @Vector(len, u8),
@@ -1651,6 +1694,26 @@ const Metadata = packed struct(u8) {
         return @truncate(hash >> shift);
     }
 };
+
+inline fn blockSize(cpu: std.Target.Cpu) usize {
+    switch (cpu.arch.family()) {
+        .x86 => |family| {
+            if (cpu.has(family, .sse2))
+                return 16;
+        },
+        .arm, .aarch64 => |family| {
+            if (cpu.has(family, .neon))
+                return 8;
+        },
+        .loongarch => |family| {
+            if (cpu.has(family, .lsx))
+                return 16;
+        },
+        else => {},
+    }
+
+    return @sizeOf(usize);
+}
 
 /// A linear probing sequence.
 const LinearProbe = struct {
@@ -1847,6 +1910,8 @@ fn nths(percent: u8) usize {
 }
 
 const std = @import("std");
+const builtin = @import("builtin");
+
 const debug = std.debug;
 const math = std.math;
 const mem = std.mem;
