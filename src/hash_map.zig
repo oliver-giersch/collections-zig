@@ -244,17 +244,16 @@ pub fn HashMapContext(
         /// An unordered iterator over populated hash map buffer indices.
         pub const EntryIterator = struct {
             remaining_len: usize,
-            entry_idx: usize = 0,
+            entry_idx: usize,
             current_block: Metadata.BitMask = 0,
 
             pub fn next(self: *EntryIterator, map: *const Self) ?usize {
                 if (self.remaining_len == 0)
                     return null;
-                // fixme: start iteration at (-1 - 16)? adds one extra iteration but less code ...
                 while (true) {
                     const bit = nextBit(&self.current_block) orelse {
                         const blocks: [*]const Metadata.Block = @ptrCast(map.metadata);
-                        self.entry_idx = self.entry_idx + Metadata.Block.len;
+                        self.entry_idx = self.entry_idx +% Metadata.Block.len;
                         const block = blocks[self.entry_idx / Metadata.Block.len];
                         self.current_block = block.used();
                         continue;
@@ -552,8 +551,9 @@ pub fn HashMapContext(
 
         test getByPtr {
             var map: AutoHashMap(i32, i32, .default) = .empty;
-            try map.reserve(tt.allocator, 4);
+            defer map.deinit(tt.allocator);
 
+            try map.reserve(tt.allocator, 4);
             map.pointer_stability.lock();
             defer map.pointer_stability.unlock();
 
@@ -572,17 +572,17 @@ pub fn HashMapContext(
 
         /// Returns a const pointer to the value associated with the given key.
         ///
-        /// C.f. `getByPtr` for further information.
+        /// See `getByPtr` for further information.
         pub fn getConstByPtr(self: *const Self, key: *const Key) *const Value {
-            const buffer = self.getBuffer() orelse unreachable;
+            const buffer = self.getConstBuffer() orelse unreachable;
             const entry_idx: usize = if (comptime multi_array)
                 @as([*]const Key, key) - buffer.header.keys
             else blk: {
-                const kv: [*]const KeyValue = @fieldParentPtr("key", key);
-                break :blk kv - buffer.header.kvs;
+                const kv: *const KeyValue = @fieldParentPtr("key", key);
+                break :blk @as([*]const KeyValue, @ptrCast(kv)) - buffer.header.kvs;
             };
 
-            return self.getValue(entry_idx);
+            return self.getConstValue(entry_idx);
         }
 
         /// Returns the total capacity for the configured maximum
@@ -860,8 +860,10 @@ pub fn HashMapContext(
             zst_ctx.insertUniqueUnchecked
         else {};
 
-        /// Returns a pointer to the value for the given key or inserts the key
-        /// and returns a pointer to the uninitialized value.
+        /// Returns a pointer to the value for the given key, if it already
+        /// exists or inserts the key and returns a pointer to the uninitialized
+        /// value, in which case the caller is responsible for initializing the
+        /// value.
         pub fn getOrInsertKeyContext(
             self: *Self,
             allocator: Allocator,
@@ -871,11 +873,18 @@ pub fn HashMapContext(
             const hash, const hint = hashKey(key, ctx);
             var probe = self.probeHash(hash);
 
+            // Probe for either the index of the existing key or for the empty
+            // slot where it should be inserted.
             var entry_idx, const found = self.probeGetOrInsertIdx(&probe, key, hint, ctx);
             if (found) {
                 return .{ .found = self.getValue(entry_idx) };
             }
 
+            // If the insertion index is clean and free, ensure that there is
+            // sufficient capacity for insertion, otherwise grow the underlying
+            // buffer.
+            // If the insertion index belongs to a deleted entry, we can just
+            // reuse that entry without needing any additional capacity.
             if (self.metadata[entry_idx].isEmpty()) {
                 if (self.remaining_capacity == 0) {
                     @branchHint(.unlikely);
@@ -894,9 +903,12 @@ pub fn HashMapContext(
             zst_ctx.getOrInsertKey
         else {};
 
-        /// Returns a pointer to the value of the key if it exists or inserts
-        /// the key and returns a pointer to the uninitialized value.
-        // FIXME: what is unchecked here? The capacity! is this a useful API?
+        /// Returns a pointer to the value for the given key, if it already
+        /// exists or inserts the key and returns a pointer to the uninitialized
+        /// value, in which case the caller is responsible for initializing the
+        /// value.
+        ///
+        /// Asserts that there is available capacity.
         pub fn getOrInsertKeyUncheckedContext(
             self: *Self,
             key: Key,
@@ -911,7 +923,9 @@ pub fn HashMapContext(
             zst_ctx.getOrInsertKeyUnchecked
         else {};
 
-        /// Returns....
+        /// Returns a copy of the the value associated with the given key-value
+        /// pair, if the key already exists or inserts the key-value pair and
+        /// returns null.
         pub fn getOrInsertContext(
             self: *Self,
             allocator: Allocator,
@@ -933,6 +947,11 @@ pub fn HashMapContext(
             zst_ctx.getOrInsert
         else {};
 
+        /// Returns a copy of the the value associated with the given key-value
+        /// pair, if the key already exists or inserts the key-value pair and
+        /// returns null.
+        ///
+        /// Asserts that there is available capacity.
         pub fn getOrInsertUncheckedContext(
             self: *Self,
             key: Key,
@@ -948,7 +967,10 @@ pub fn HashMapContext(
         else {};
 
         /// Removes the given key and its associated value and returns true, if
-        /// a key-value pair was actually removed.
+        /// there was one.
+        ///
+        /// This may or may not increase the available capacity by one, but slot
+        /// of the removed key-value pair *can* be reused by subsequent inserts.
         pub fn removeContext(self: *Self, key: Key, ctx: Context) bool {
             return self.removeFetchContext(key, ctx) != null;
         }
@@ -957,10 +979,12 @@ pub fn HashMapContext(
             zst_ctx.remove
         else {};
 
-        /// Removes the given key and its associated value and returns the
-        /// removed value, if there is one.
+        /// Removes the given key and its associated value and returns a copy of
+        /// the removed value, if there is one.
         ///
-        /// This may or may not increase the available capacity by one.
+        /// This may or may not increase the available capacity by one, but the
+        /// slot of the removed key-value pair *can* be reused by subsequent
+        /// inserts.
         pub fn removeFetchContext(self: *Self, key: Key, ctx: Context) ?Value {
             const hash, const hint = hashKey(key, ctx);
             var probe = self.probeHash(hash);
@@ -1267,10 +1291,9 @@ pub fn HashMapContext(
 
         /// Returns an iterator over all populated entry indices.
         fn entryIter(self: *const Self) EntryIterator {
-            const blocks: [*]const Metadata.Block = @ptrCast(self.metadata);
             return .{
                 .remaining_len = self.len,
-                .current_block = blocks[0].used(),
+                .entry_idx = ~@as(usize, 0) - Metadata.Block.len + 1,
             };
         }
 
@@ -1576,8 +1599,10 @@ pub fn HashMapContext(
                 return self.insertUniqueUncheckedContext(key, value, undefined);
             }
 
-            /// Returns a pointer to the value for the given key or inserts the
-            /// key and returns a pointer to the uninitialized value.
+            /// Returns a pointer to the value for the given key, if it already
+            /// exists or inserts the key and returns a pointer to the
+            /// uninitialized value, in which case the caller is responsible for
+            /// initializing the value.
             pub fn getOrInsertKey(
                 self: *Self,
                 allocator: Allocator,
@@ -1586,14 +1611,19 @@ pub fn HashMapContext(
                 return self.getOrInsertKeyContext(allocator, key, undefined);
             }
 
-            /// Returns a pointer to the value for the given key or inserts the
-            /// key and returns a pointer to the uninitialized value.
+            /// Returns a pointer to the value for the given key, if it already
+            /// exists or inserts the key and returns a pointer to the
+            /// uninitialized value, in which case the caller is responsible for
+            /// initializing the value.
             ///
             /// Asserts that there is available capacity
             pub fn getOrInsertKeyUnchecked(self: *Self, key: Key) GetOrInsert {
                 return self.getOrInsertKeyUncheckedContext(key, undefined);
             }
 
+            /// Returns a copy of the the value associated with the given
+            /// key-value pair, if the key already exists or inserts the
+            /// key-value pair and returns null.
             pub fn getOrInsert(
                 self: *Self,
                 allocator: Allocator,
@@ -1603,6 +1633,11 @@ pub fn HashMapContext(
                 return self.getOrInsertContext(allocator, key, value, undefined);
             }
 
+            /// Returns a copy of the the value associated with the given
+            /// key-value pair, if the key already exists or inserts the
+            /// key-value pair and returns null.
+            ///
+            /// Asserts that there is available capacity.
             pub fn getOrInsertUnchecked(
                 self: *Self,
                 key: K,
@@ -1612,10 +1647,18 @@ pub fn HashMapContext(
                 return self.getOrInsertUncheckedContext(key, value, ctx);
             }
 
+            /// Removes the given key and its associated value and returns true,
+            /// if there was one.
             pub fn remove(self: *Self, key: Key) bool {
                 return self.removeContext(key, undefined);
             }
 
+            /// Removes the given key and its associated value and returns a
+            /// copy of the removed value, if there is one.
+            ///
+            /// This may or may not increase the available capacity by one, but
+            /// the slot of the removed key-value pair *can* be reused by
+            /// subsequent inserts.
             pub fn removeFetch(self: *Self, key: Key) ?Value {
                 return self.removeFetchContext(key, undefined);
             }
