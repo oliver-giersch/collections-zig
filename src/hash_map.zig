@@ -1169,6 +1169,8 @@ pub fn HashMapContext(
             self.len += 1;
         }
 
+        /// Inserts the given metadata for the given index and mirrors it, if
+        /// necessary.
         fn insertMetadata(self: *Self, entry_idx: usize, metadata: Metadata) void {
             const mirror_idx = self.getMirrorIdx(entry_idx);
             if (entry_idx != mirror_idx) {
@@ -1190,17 +1192,26 @@ pub fn HashMapContext(
 
             while (true) {
                 const block = self.getMetadataBlock(probe.pos);
+
+                // Search for a matching metadata slot and equal key.
                 if (block.find(hint)) |relative_idx| {
                     const metadata_idx = metadataIdx(probe, relative_idx);
                     if (self.eqlKey(key, hint, metadata_idx, ctx)) |entry_idx|
                         return .{ entry_idx, true };
                 }
 
+                // Search for a possible insertion slot for the given key,
+                // unless we already found one in a previous block in the hash's
+                // probe sequence.
                 if (insert_idx == null) {
                     if (block.findFree()) |relative_idx|
                         insert_idx = metadataIdx(probe, relative_idx) & self.entry_mask;
                 }
 
+                // Keep probing until we find a definitive empty slot
+                // terminating the probe sequence. Before finding a sequence
+                // terminating empty value, we might yet find the probed key
+                // later in the sequence.
                 if (insert_idx) |idx| {
                     if (block.find(.empty)) |_|
                         return .{ idx, false };
@@ -1228,7 +1239,7 @@ pub fn HashMapContext(
                 }
 
                 // Upon encountering an empty slot within a probed block stop
-                // searchin further.
+                // searching further.
                 if (block.find(.empty)) |_|
                     return null;
 
@@ -1255,10 +1266,12 @@ pub fn HashMapContext(
                     const entry_idx = metadataIdx(probe, relative_idx) & self.entry_mask;
                     return entry_idx;
                 }
+
                 _ = probe.next(self.entry_mask);
             }
         }
 
+        /// Prepares a probe sequence for the given hash.
         fn probeHash(self: *const Self, hash: Hash) Probe {
             const entry_idx = self.getEntry(hash);
             return .start(entry_idx);
@@ -1360,10 +1373,12 @@ pub fn HashMapContext(
             return ptr[0..len];
         }
 
+        /// Returns a key pointer for the given entry index.
         fn getKey(self: *Self, entry_idx: usize) *Key {
             return @constCast(self.getConstKey(entry_idx));
         }
 
+        /// Returns a const key pointer for the given entry index.
         fn getConstKey(self: *const Self, entry_idx: usize) *const Key {
             const buffer = self.getConstBuffer() orelse unreachable;
             return if (comptime multi_array)
@@ -1372,10 +1387,12 @@ pub fn HashMapContext(
                 &buffer.header.kvs[entry_idx].key;
         }
 
+        /// Returns a value pointer for the given entry index.
         fn getValue(self: *Self, entry_idx: usize) *Value {
             return @constCast(self.getConstValue(entry_idx));
         }
 
+        /// Returns a const value pointer for the given entry index.
         fn getConstValue(self: *const Self, entry_idx: usize) *const Value {
             const buffer = self.getConstBuffer() orelse unreachable;
             return if (comptime multi_array)
@@ -1432,11 +1449,14 @@ pub fn HashMapContext(
                 const keys = buffer.header.keys[0..entries];
                 return keys.ptr <= ptr and ptr <= keys.ptr + keys.len;
             } else {
+                const kv: *const KeyValue = @fieldParentPtr("key", key);
                 const kvs = buffer.header.kvs[0..entries];
-                return kvs.ptr <= ptr and ptr <= kvs.ptr + kvs.len;
+                return kvs.ptr <= kv and kv <= kvs.ptr + kvs.len;
             }
         }
 
+        /// Returns the metadata slot index corresponding to the given probe
+        /// sequence position-relative index.
         fn metadataIdx(probe: *const Probe, relative_idx: usize) usize {
             return if (comptime options.probing_strategy == .cache_line)
                 (probe.pos & cache_line.mask) + ((probe.pos + relative_idx) & (cache_line.len - 1))
@@ -1444,14 +1464,17 @@ pub fn HashMapContext(
                 probe.pos + relative_idx;
         }
 
+        /// Hashes the given key and returns both the hash and the metadata
+        /// slot value containing a matching hash hint.
         fn hashKey(key: Key, ctx: Context) struct { Hash, Metadata } {
             const hash: Hash = ctx.hash(key);
             return .{ hash, .hashHint(hash) };
         }
 
-        // at least 1 free entry at all times!
-        // load factor configurable at comptime!
-        // always a power of 2!
+        /// Returns the required power-of-2 buffer size for the given capacity
+        /// taking into account the configured maximum load factor.
+        ///
+        /// Fails, if the buffer size would overflow.
         fn entriesForCapacity(min_capacity: usize) OOM!usize {
             assert(min_capacity != 0);
             if (min_capacity < load_min_capacity) {
