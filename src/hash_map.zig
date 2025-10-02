@@ -1200,8 +1200,9 @@ pub fn HashMapContext(
             while (true) {
                 const block = self.getMetadataBlock(probe.pos);
 
-                // Search for a matching metadata slot and equal key.
-                if (block.find(hint)) |relative_idx| {
+                // Search for any matching metadata slot and equal key.
+                var matches = block.findAll(hint);
+                while (nextBit(&matches)) |relative_idx| {
                     const metadata_idx = metadataIdx(probe, relative_idx);
                     if (self.eqlKey(key, hint, metadata_idx, ctx)) |entry_idx|
                         return .{ entry_idx, true };
@@ -1220,7 +1221,7 @@ pub fn HashMapContext(
                 // terminating empty value, we might yet find the probed key
                 // later in the sequence.
                 if (insert_idx) |idx| {
-                    if (block.find(.empty)) |_|
+                    if (block.find(.empty)) |_| // maybe check entry_idx first? it's likely the right type
                         return .{ idx, false };
                 }
 
@@ -1239,7 +1240,10 @@ pub fn HashMapContext(
                 // Search for a metadata block containing the correct hash hint
                 // for the queried key in accordance with the probing sequence.
                 const block = self.getMetadataBlock(probe.pos);
-                if (block.find(hint)) |relative_idx| {
+
+                // Search for any matching metadata slot and equal key.
+                var matches = block.findAll(hint);
+                while (nextBit(&matches)) |relative_idx| {
                     const metadata_idx = metadataIdx(probe, relative_idx);
                     if (self.eqlKey(key, hint, metadata_idx, ctx)) |entry_idx|
                         return entry_idx;
@@ -1708,7 +1712,7 @@ const Metadata = packed struct(u8) {
 
         /// Returns the index of first the slot that equals the given metadata.
         fn find(self: Block, metadata: Metadata) ?usize {
-            const bits: BitMask = @bitCast(self.vector == Metadata.repeat(metadata).vector);
+            const bits = self.findAll(metadata);
             return if (bits == 0) null else @ctz(bits);
         }
 
@@ -1716,6 +1720,10 @@ const Metadata = packed struct(u8) {
         fn findFree(self: Block) ?usize {
             const bits: BitMask = @bitCast(self.vector >= Metadata.repeat(.deleted).vector);
             return if (bits == 0) null else @ctz(bits);
+        }
+
+        fn findAll(self: Block, metadata: Metadata) Metadata.BitMask {
+            return @bitCast(self.vector == Metadata.repeat(metadata).vector);
         }
 
         fn used(self: Block) Metadata.BitMask {
@@ -2420,6 +2428,67 @@ test "value iterator" {
 }
 
 const testing = std.testing;
+
+test "insert 1e2 elements" {
+    const n = 100;
+
+    var map: HashMap(u32, u32, .default) = .empty;
+    defer map.deinit(testing.allocator);
+
+    var i: u32 = 0;
+    while (i < n) : (i += 1) {
+        const prev = map.insertFetch(testing.allocator, i, i);
+        try testing.expectEqual(null, prev);
+    }
+
+    i = 0;
+    while (i < n) : (i += 1) {
+        const value = map.get(i);
+        try testing.expectEqual(i, value);
+    }
+}
+
+test "insert 1e3 elements" {
+    const n = 1000;
+
+    var map: HashMap(u32, u32, .default) = .empty;
+    defer map.deinit(testing.allocator);
+
+    var i: u32 = 0;
+    while (i < n) : (i += 1) {
+        const prev = map.insertFetch(testing.allocator, i, i);
+        try testing.expectEqual(null, prev);
+    }
+
+    i = 0;
+    while (i < n) : (i += 1) {
+        const value = map.get(i);
+        try testing.expectEqual(i, value);
+    }
+
+    try testing.expectEqual(n, map.len);
+}
+
+test "insert 1e6 elements" {
+    const n = 1000;
+
+    var map: HashMap(u32, u32, .default) = .empty;
+    defer map.deinit(testing.allocator);
+
+    var i: u32 = 0;
+    while (i < n) : (i += 1) {
+        const prev = map.insertFetch(testing.allocator, i, i);
+        try testing.expectEqual(null, prev);
+    }
+
+    i = 0;
+    while (i < n) : (i += 1) {
+        const value = map.get(i);
+        try testing.expectEqual(i, value);
+    }
+
+    try testing.expectEqual(n, map.len);
+}
 
 test "remove 1e6 elements randomly" {
     const ArrayList = @import("array_list.zig").ArrayList;
