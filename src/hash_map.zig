@@ -344,7 +344,8 @@ pub fn HashMapContext(
                 // Set all metadata slots to their empty default state.
                 const buffer: *Buffer = @ptrCast(buf.ptr);
                 const metadata: [*]Metadata.Block = &buffer.metadata;
-                @memset(metadata[0..entries], Metadata.repeat(.empty));
+                const blocks = entries / Metadata.Block.len;
+                @memset(metadata[0..blocks], Metadata.repeat(.empty));
 
                 // Advance memory address to the (unaligned) start of the
                 // key-value or key array.
@@ -466,6 +467,7 @@ pub fn HashMapContext(
                 .remaining_capacity = remaining_capacity,
                 .entry_mask = entry_mask,
                 .metadata = @ptrCast(&buffer.metadata),
+                .pointer_stability = .unlocked,
             };
         }
 
@@ -996,7 +998,12 @@ pub fn HashMapContext(
             } else self.insertMetadata(entry_idx, .deleted);
             self.len -= 1;
 
-            return self.getValue(entry_idx).*;
+            const value = self.getValue(entry_idx).*;
+
+            self.getKey(entry_idx).* = undefined;
+            self.getValue(entry_idx).* = undefined;
+
+            return value;
         }
 
         pub const removeFetch = if (is_zst_ctx)
@@ -1876,6 +1883,15 @@ test "cache line probe" {
     try tt.expectEqual(28, probe.next(entry_mask));
 }
 
+test "metadata" {
+    const empty: u8 = @bitCast(Metadata.empty);
+    const deleted: u8 = @bitCast(Metadata.deleted);
+
+    try tt.expectEqual(0b1111_1111, empty);
+    try tt.expectEqual(0b1000_0000, deleted);
+    try tt.expect(empty >= deleted);
+}
+
 test "metadata find" {
     const hash1: Metadata = .{ .hash_hint = 0b1101101, .free = false };
     const hash2: Metadata = .{ .hash_hint = 0b0011010, .free = false };
@@ -2402,3 +2418,51 @@ test "value iterator" {
         try tt.expectEqual(i * 4, value_list.items[i]);
     }
 }
+
+const testing = std.testing;
+
+test "remove 1e6 elements randomly" {
+    const ArrayList = @import("array_list.zig").ArrayList;
+    const n = 1_000_000;
+
+    //var map: HashMap(u32, u32, .default) = .empty;
+    var map: HashMap(u32, u32, .default) = try .initCapacity(testing.allocator, n);
+    defer map.deinit(testing.allocator);
+
+    var keys: ArrayList(u32) = .empty;
+    defer keys.deinit(testing.allocator);
+
+    var i: u32 = 0;
+    while (i < n) : (i += 1) {
+        try keys.push(testing.allocator, i);
+    }
+
+    var prng = std.Random.DefaultPrng.init(std.testing.random_seed);
+    const random = prng.random();
+    random.shuffle(u32, keys.bounded.items);
+
+    for (keys.bounded.items) |key| {
+        try map.insert(testing.allocator, key, key);
+        //map.insertUnchecked(key, key);
+    }
+
+    i = 0;
+    while (i < n) : (i += 1) {
+        const value = map.get(i);
+        try tt.expectEqual(i, value);
+    }
+
+    random.shuffle(u32, keys.bounded.items);
+    i = 0;
+
+    while (i < n) : (i += 1) {
+        const key = keys.bounded.items[i];
+        const prev = map.removeFetch(key);
+        if (prev == null) {
+            unreachable;
+        }
+        try testing.expectEqual(key, prev);
+    }
+}
+
+const HM = std.hash_map.HashMapUnmanaged;
