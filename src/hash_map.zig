@@ -159,7 +159,6 @@ pub fn HashMapContext(
             .remaining_capacity = 0,
             .entry_mask = 0,
             .metadata = @ptrCast(&empty_block),
-            .pointer_stability = .unlocked,
         };
 
         /// The key type.
@@ -344,7 +343,7 @@ pub fn HashMapContext(
                 // Set all metadata slots to their empty default state.
                 const buffer: *Buffer = @ptrCast(buf.ptr);
                 const metadata: [*]Metadata.Block = &buffer.metadata;
-
+                // Note: We must initialize the extra metadata block as well.
                 const metadata_size = metadataSize(entries);
                 const blocks = metadata_size / @sizeOf(Metadata.Block);
                 @memset(metadata[0..blocks], Metadata.repeat(.empty));
@@ -449,7 +448,7 @@ pub fn HashMapContext(
         /// pointers returned by lookups and use them to cheaply retrieve their
         /// associated values without hashing with the `getByPtr` or
         /// `getConstByPtr`.
-        pointer_stability: SafetyLock,
+        pointer_stability: SafetyLock = .unlocked,
 
         /// Returns an initialized hash map with sufficient capacity for at
         /// least the given number of entries.
@@ -469,7 +468,6 @@ pub fn HashMapContext(
                 .remaining_capacity = remaining_capacity,
                 .entry_mask = entry_mask,
                 .metadata = @ptrCast(&buffer.metadata),
-                .pointer_stability = .unlocked,
             };
         }
 
@@ -621,12 +619,12 @@ pub fn HashMapContext(
 
             switch (mode) {
                 .memcpy => {
-                    @memcpy(cloned.getMetadataBlocks(), self.getMetadataBlocks());
+                    @memcpy(cloned.getMetadataBlocks(), self.getConstMetadataBlocks());
                     if (comptime multi_array) {
-                        @memcpy(buffer.header.keys, old_buffer.header.keys);
-                        @memcpy(buffer.header.values, old_buffer.header.values);
+                        @memcpy(buffer.header.keys[0..entries], old_buffer.header.keys[0..entries]);
+                        @memcpy(buffer.header.values[0..entries], old_buffer.header.values[0..entries]);
                     } else {
-                        @memcpy(buffer.header.kvs, old_buffer.header.kvs);
+                        @memcpy(buffer.header.kvs[0..entries], old_buffer.header.kvs[0..entries]);
                     }
                     cloned.remaining_capacity = self.remaining_capacity;
                 },
@@ -640,9 +638,21 @@ pub fn HashMapContext(
             return cloned;
         }
 
-        const clone = if (is_zst_ctx)
-            zst_ctx.clone
-        else {};
+        pub fn bitchclone(
+            self: *const Self,
+            allocator: Allocator,
+            mode: CloneMode,
+        ) OOM!Self {
+            if (!is_zst_ctx)
+                @compileError("HashMap Context type is not zero-size");
+            return zst_ctx.clone(self, allocator, mode);
+        }
+
+        const clone = if (is_zst_ctx) zst_ctx.clone else {};
+
+        //const clone = if (is_zst_ctx)
+        //    zst_ctx.clone
+        //else {};
 
         /// Reserves at least enough capacity for the given number of additional
         /// entries.
@@ -660,9 +670,7 @@ pub fn HashMapContext(
             try self.grow(allocator, count, ctx);
         }
 
-        pub const reserve = if (is_zst_ctx)
-            zst_ctx.reserve
-        else {};
+        pub const reserve = if (is_zst_ctx) zst_ctx.reserve else {};
 
         /// Rehashes all key-value pairs inplace, without reallocating.
         ///
@@ -676,9 +684,7 @@ pub fn HashMapContext(
             self.remaining_capacity = self.getUsableCapacity() - self.len;
         }
 
-        pub const rehash = if (is_zst_ctx)
-            zst_ctx.rehash
-        else {};
+        pub const rehash = if (is_zst_ctx) zst_ctx.rehash else {};
 
         /// Returns true, if the map contains the given key.
         pub fn containsContext(
@@ -691,9 +697,7 @@ pub fn HashMapContext(
             return self.probeGetIdx(&probe, key, hint, ctx) != null;
         }
 
-        pub const contains = if (is_zst_ctx)
-            zst_ctx.contains
-        else {};
+        pub const contains = if (is_zst_ctx) zst_ctx.contains else {};
 
         /// Returns a const pointer to the value for the given key.
         pub fn getConstPtrContext(
@@ -708,9 +712,7 @@ pub fn HashMapContext(
             return self.getConstValue(entry_idx);
         }
 
-        pub const getConstPtr = if (is_zst_ctx)
-            zst_ctx.getConstPtr
-        else {};
+        pub const getConstPtr = if (is_zst_ctx) zst_ctx.getConstPtr else {};
 
         /// Returns a pointer to the value for the given key.
         pub fn getPtrContext(
@@ -721,9 +723,7 @@ pub fn HashMapContext(
             return @constCast(self.getConstPtrContext(key, ctx));
         }
 
-        pub const getPtr = if (is_zst_ctx)
-            zst_ctx.getPtr
-        else {};
+        pub const getPtr = if (is_zst_ctx) zst_ctx.getPtr else {};
 
         /// Returns a const pointer to the value for the given key.
         pub fn getContext(self: *const Self, key: Key, ctx: Context) ?Value {
@@ -731,9 +731,7 @@ pub fn HashMapContext(
             return ptr.*;
         }
 
-        pub const get = if (is_zst_ctx)
-            zst_ctx.get
-        else {};
+        pub const get = if (is_zst_ctx) zst_ctx.get else {};
 
         /// Inserts the given key-value pair, silently overwriting the
         /// previous value associated to that key, if there is one.
@@ -747,9 +745,7 @@ pub fn HashMapContext(
             _ = try self.insertFetchContext(allocator, key, value, ctx);
         }
 
-        pub const insert = if (is_zst_ctx)
-            zst_ctx.insert
-        else {};
+        pub const insert = if (is_zst_ctx) zst_ctx.insert else {};
 
         /// Inserts the given key-value pair, silently overwriting the previous
         /// value associated with the key, if there is one.
@@ -764,9 +760,7 @@ pub fn HashMapContext(
             _ = self.insertFetchUncheckedContext(key, value, ctx);
         }
 
-        pub const insertUnchecked = if (is_zst_ctx)
-            zst_ctx.insertUnchecked
-        else {};
+        pub const insertUnchecked = if (is_zst_ctx) zst_ctx.insertUnchecked else {};
 
         /// Inserts the given key-value pair and returns a copy of the previous
         /// value associated with the key, if there is one.
@@ -791,9 +785,7 @@ pub fn HashMapContext(
             }
         }
 
-        pub const insertFetch = if (is_zst_ctx)
-            zst_ctx.insertFetch
-        else {};
+        pub const insertFetch = if (is_zst_ctx) zst_ctx.insertFetch else {};
 
         /// Inserts the given key-value pair and returns a copy of the previous
         /// value associated with the key, if there is one.
@@ -810,9 +802,7 @@ pub fn HashMapContext(
             return res;
         }
 
-        pub const insertFetchUnchecked = if (is_zst_ctx)
-            zst_ctx.insertFetchUnchecked
-        else {};
+        pub const insertFetchUnchecked = if (is_zst_ctx) zst_ctx.insertFetchUnchecked else {};
 
         /// Inserts the given key-value pair.
         ///
@@ -842,9 +832,7 @@ pub fn HashMapContext(
             self.getValue(entry_idx).* = value;
         }
 
-        pub const insertUnique = if (is_zst_ctx)
-            zst_ctx.insertUnique
-        else {};
+        pub const insertUnique = if (is_zst_ctx) zst_ctx.insertUnique else {};
 
         /// Inserts the given key-value pair.
         ///
@@ -947,9 +935,7 @@ pub fn HashMapContext(
             }
         }
 
-        pub const getOrInsert = if (is_zst_ctx)
-            zst_ctx.getOrInsert
-        else {};
+        pub const getOrInsert = if (is_zst_ctx) zst_ctx.getOrInsert else {};
 
         /// Returns a copy of the the value associated with the given key-value
         /// pair, if the key already exists or inserts the key-value pair and
@@ -979,9 +965,7 @@ pub fn HashMapContext(
             return self.removeFetchContext(key, ctx) != null;
         }
 
-        pub const remove = if (is_zst_ctx)
-            zst_ctx.remove
-        else {};
+        pub const remove = if (is_zst_ctx) zst_ctx.remove else {};
 
         /// Removes the given key and its associated value and returns a copy of
         /// the removed value, if there is one.
@@ -1008,9 +992,7 @@ pub fn HashMapContext(
             return value;
         }
 
-        pub const removeFetch = if (is_zst_ctx)
-            zst_ctx.removeFetch
-        else {};
+        pub const removeFetch = if (is_zst_ctx) zst_ctx.removeFetch else {};
 
         fn isLastInSequence(
             self: *const Self,
@@ -1069,7 +1051,7 @@ pub fn HashMapContext(
                 .remaining_capacity = applyLoadLimit(entry_mask) - old_table.len,
                 .entry_mask = entry_mask,
                 .metadata = @ptrCast(&buffer.metadata),
-                .pointer_stability = .locked,
+                .pointer_stability = self.pointer_stability,
             };
 
             // Insert all key-value pairs from the previous map into the newly
@@ -1100,7 +1082,7 @@ pub fn HashMapContext(
                 inner: while (true) {
                     // Rehash the key at the current index' slot.
                     // NOTE: The pointer always points at the same address, but
-                    // the key behind this address may change inbetween
+                    // the key behind this address will change inbetween
                     // iterations.
                     const hash, const hint = hashKey(key.*, ctx);
                     var probe = self.probeHash(hash);
@@ -1161,10 +1143,8 @@ pub fn HashMapContext(
                     const hash, const hint = hashKey(key.*, ctx);
                     const insert_idx = self.findInsertIdx(hash);
                     self.insertMetadata(insert_idx, hint);
-                    const new_key = self.getKey(insert_idx);
-                    const new_value = self.getValue(insert_idx);
-                    new_key.* = key.*;
-                    new_value.* = value.*;
+                    self.getKey(insert_idx).* = key.*;
+                    self.getValue(insert_idx).* = value.*;
                 }
             }
         }
@@ -1307,10 +1287,8 @@ pub fn HashMapContext(
             // Due to the mirror metadata slot we can use the given idx directly
             // for the metadata lookup, but not for looking up the key entry.
             const entry_idx = metadata_idx & self.entry_mask;
-            return if (ctx.eql(key, self.getConstKey(entry_idx).*))
-                entry_idx
-            else
-                null;
+            const is_eql = ctx.eql(key, self.getConstKey(entry_idx).*);
+            return if (is_eql) entry_idx else null;
         }
 
         /// Returns an iterator over all populated entry indices.
@@ -1428,10 +1406,11 @@ pub fn HashMapContext(
         }
 
         fn getRelativeIdx(self: *const Self, base_idx: usize, entry_idx: usize) usize {
+            const relative_idx = entry_idx -% base_idx;
             return if (comptime options.probing_strategy == .cache_line)
-                (entry_idx -% base_idx) & (cache_line.len - 1) & self.entry_mask
+                relative_idx & (cache_line.len - 1) & self.entry_mask
             else
-                (entry_idx -% base_idx) & self.entry_mask;
+                relative_idx & self.entry_mask;
         }
 
         fn getMirrorIdx(self: *const Self, entry_idx: usize) usize {
@@ -1444,17 +1423,14 @@ pub fn HashMapContext(
 
         fn noAlloc(self: *const Self) bool {
             const zero_capacity = self.entry_mask == 0;
-            if (zero_capacity) {
-                const ptr: [*]const Metadata = @ptrCast(&empty_block);
-                assert(self.metadata == ptr);
-            }
-
+            assert(!zero_capacity or self.metadata == @as([*]const Metadata, @ptrCast(&empty_block)));
             return zero_capacity;
         }
 
         fn containsKeyPtr(self: *const Self, key: *const Key) bool {
             const buffer = self.getConstBuffer() orelse unreachable;
             const entries = self.getEntries();
+
             const ptr: [*]const Key = @ptrCast(key);
             if (comptime multi_array) {
                 const keys = buffer.header.keys[0..entries];
@@ -1707,7 +1683,6 @@ const Metadata = packed struct(u8) {
     const Block = extern struct {
         const len = blockSize(builtin.cpu);
         const mask = len - 1;
-
         const msb = Block{ .vector = @splat(0x80) };
 
         vector: @Vector(len, u8),
@@ -1726,14 +1701,18 @@ const Metadata = packed struct(u8) {
             return if (bits == 0) null else @ctz(bits);
         }
 
+        /// Returns a bitmask for all metadata slots that equal the given value.
         fn findAll(self: Block, metadata: Metadata) Metadata.BitMask {
             return @bitCast(self.vector == Metadata.repeat(metadata).vector);
         }
 
+        /// Returns a bitmask for all metadata that are not free.
         fn used(self: Block) Metadata.BitMask {
             return @bitCast(self.vector < Metadata.repeat(.deleted).vector);
         }
 
+        /// Prepares the block for rehashing by converting all used slots to
+        /// deleted and all empty/deleted ones to empty.
         fn prepareRehash(self: Block) Block {
             // All slots with the MSB set (empty and deleted).
             const pred = self.vector >= Metadata.repeat(.deleted).vector;
