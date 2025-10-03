@@ -98,8 +98,13 @@ pub const Options = struct {
 
     /// The probing strategy for resolving hash collisions.
     pub const ProbingStrategy = enum {
+        /// Linear probing simply probes one block after another.
         linear,
+        /// Triangular probing skips increasingly larger strides of blocks at
+        /// each step.
         triangular,
+        /// Cache line probing always probes every block within a cache line
+        /// before moving to the next cache line.
         cache_line,
     };
 
@@ -143,9 +148,13 @@ pub const Hash = u64;
 
 /// An unmanaged hash map with explicit hash and equality context.
 pub fn HashMapContext(
+    /// The key type.
     comptime K: type,
+    /// The value type.
     comptime V: type,
+    /// The context type providing key hashing and equality functions.
     comptime C: type,
+    /// The configuration settings.
     comptime O: Options,
 ) type {
     if (O.max_load_percentage < 50)
@@ -184,6 +193,10 @@ pub fn HashMapContext(
             map: *const Self,
             it: EntryIterator,
 
+            /// Returns the next key const pointer in the iterator sequence.
+            ///
+            /// The keys are iterated in a deterministic but implementation
+            /// defined order.
             pub fn next(self: *KeyIterator) ?*const Key {
                 const entry_idx = self.it.next(self.map) orelse return null;
                 return self.map.getConstKey(entry_idx);
@@ -201,6 +214,7 @@ pub fn HashMapContext(
 
                 /// The parent hash map.
                 map: MapPointer,
+                /// The iterator over all populated entry indices.
                 it: EntryIterator,
 
                 /// Returns the next key-value pair in the iterator sequence and
@@ -513,10 +527,9 @@ pub fn HashMapContext(
 
         /// Clears all map entries but keeps any allocated capacity.
         pub fn clear(self: *Self) void {
-            self.pointer_stability.lock();
-            defer self.pointer_stability.unlock();
+            self.pointer_stability.assertUnlocked();
 
-            if (self.noAlloc()) {
+            if (self.notAllocated()) {
                 @branchHint(.unlikely);
                 assert(self.remaining_capacity == 0 and self.len == 0);
                 return;
@@ -638,21 +651,7 @@ pub fn HashMapContext(
             return cloned;
         }
 
-        pub fn bitchclone(
-            self: *const Self,
-            allocator: Allocator,
-            mode: CloneMode,
-        ) OOM!Self {
-            if (!is_zst_ctx)
-                @compileError("HashMap Context type is not zero-size");
-            return zst_ctx.clone(self, allocator, mode);
-        }
-
-        const clone = if (is_zst_ctx) zst_ctx.clone else {};
-
-        //const clone = if (is_zst_ctx)
-        //    zst_ctx.clone
-        //else {};
+        pub const clone = if (is_zst_ctx) zst_ctx.clone else {};
 
         /// Reserves at least enough capacity for the given number of additional
         /// entries.
@@ -677,9 +676,7 @@ pub fn HashMapContext(
         /// This clears up any locked up capacity from deleted entries, that
         /// could otherwise not be reused.
         pub fn rehashContext(self: *Self, ctx: Context) void {
-            self.pointer_stability.lock();
-            defer self.pointer_stability.unlock();
-
+            self.pointer_stability.assertUnlocked();
             self.rehashInPlace(ctx);
             self.remaining_capacity = self.getUsableCapacity() - self.len;
         }
@@ -760,7 +757,9 @@ pub fn HashMapContext(
             _ = self.insertFetchUncheckedContext(key, value, ctx);
         }
 
-        pub const insertUnchecked = if (is_zst_ctx) zst_ctx.insertUnchecked else {};
+        pub const insertUnchecked = if (is_zst_ctx)
+            zst_ctx.insertUnchecked
+        else {};
 
         /// Inserts the given key-value pair and returns a copy of the previous
         /// value associated with the key, if there is one.
@@ -802,7 +801,9 @@ pub fn HashMapContext(
             return res;
         }
 
-        pub const insertFetchUnchecked = if (is_zst_ctx) zst_ctx.insertFetchUnchecked else {};
+        pub const insertFetchUnchecked = if (is_zst_ctx)
+            zst_ctx.insertFetchUnchecked
+        else {};
 
         /// Inserts the given key-value pair.
         ///
@@ -830,6 +831,7 @@ pub fn HashMapContext(
 
             self.insertKey(entry_idx, key, hint);
             self.getValue(entry_idx).* = value;
+            self.len += 1;
         }
 
         pub const insertUnique = if (is_zst_ctx) zst_ctx.insertUnique else {};
@@ -868,9 +870,8 @@ pub fn HashMapContext(
             // Probe for either the index of the existing key or for the empty
             // slot where it should be inserted.
             var entry_idx, const found = self.probeGetOrInsertIdx(&probe, key, hint, ctx);
-            if (found) {
+            if (found)
                 return .{ .found = self.getValue(entry_idx) };
-            }
 
             // If the insertion index is clean and free, ensure that there is
             // sufficient capacity for insertion, otherwise grow the underlying
@@ -888,6 +889,8 @@ pub fn HashMapContext(
             }
 
             self.insertKey(entry_idx, key, hint);
+            self.len += 1;
+
             return .{ .inserted = self.getValue(entry_idx) };
         }
 
@@ -1021,11 +1024,7 @@ pub fn HashMapContext(
         ) OOM!void {
             @branchHint(.cold);
             assert(self.remaining_capacity < count);
-
-            // Enforce that no consumer is relying on pointer stability when
-            // the map is resized.
-            self.pointer_stability.lock();
-            defer self.pointer_stability.unlock();
+            self.pointer_stability.assertUnlocked();
 
             const old_cap = self.getUsableCapacity();
             const new_cap = try overflowingAdd(self.len, count);
@@ -1045,20 +1044,19 @@ pub fn HashMapContext(
             const buffer = try Buffer.alloc(allocator, new_entries);
             errdefer comptime unreachable;
 
-            var old_table = self.*;
+            var old_map = self.*;
             self.* = .{
-                .len = old_table.len,
-                .remaining_capacity = applyLoadLimit(entry_mask) - old_table.len,
+                .len = old_map.len,
+                .remaining_capacity = applyLoadLimit(entry_mask) - old_map.len,
                 .entry_mask = entry_mask,
                 .metadata = @ptrCast(&buffer.metadata),
-                .pointer_stability = self.pointer_stability,
             };
 
             // Insert all key-value pairs from the previous map into the newly
             // allocated buffer.
-            self.batchInsert(&old_table, ctx);
-            if (old_table.getBuffer()) |old_buffer|
-                old_buffer.free(allocator, old_table.getEntries());
+            self.batchInsert(&old_map, ctx);
+            if (old_map.getBuffer()) |old_buffer|
+                old_buffer.free(allocator, old_map.getEntries());
         }
 
         fn rehashInPlace(self: *Self, ctx: Context) void {
@@ -1149,14 +1147,14 @@ pub fn HashMapContext(
             }
         }
 
+        /// Inserts the given key and metadata slot at the given entry index.
         fn insertKey(self: *Self, entry_idx: usize, key: Key, hint: Metadata) void {
             self.insertMetadata(entry_idx, hint);
             self.getKey(entry_idx).* = key;
-            self.len += 1;
         }
 
-        /// Inserts the given metadata for the given index and mirrors it, if
-        /// necessary.
+        /// Inserts the given metadata for the given index and mirrors it
+        /// if necessary.
         fn insertMetadata(self: *Self, entry_idx: usize, metadata: Metadata) void {
             const mirror_idx = self.getMirrorIdx(entry_idx);
             if (entry_idx != mirror_idx) {
@@ -1175,8 +1173,9 @@ pub fn HashMapContext(
             ctx: Context,
         ) struct { usize, bool } {
             var insert_idx: ?usize = null;
-
             while (true) {
+                // Search for a metadata block containing the correct hash hint
+                // for the queried key in accordance with the probing sequence.
                 const block = self.getMetadataBlock(probe.pos);
 
                 // Search for any matching metadata slot and equal key.
@@ -1238,9 +1237,12 @@ pub fn HashMapContext(
             }
         }
 
-        // Finds and returns the "natural" insertion index for the given hash as
-        // well as the first possible insertion index, without checking if the
-        // key already exists.
+        /// Finds and returns the first available insertion index for the given
+        /// hash within the probing sequence.
+        ///
+        /// This function is only valid and relies on
+        ///   1) there being at least one empty slot
+        ///   2) there being no key from which the hash in the map.
         fn findInsertIdx(
             self: *const Self,
             hash: Hash,
@@ -1249,6 +1251,8 @@ pub fn HashMapContext(
             return self.probeInsertIdx(&probe);
         }
 
+        /// Probes the given probing sequence chain until a free metadata slot
+        /// is found.
         fn probeInsertIdx(self: *const Self, probe: *Probe) usize {
             while (true) {
                 const block = self.getMetadataBlock(probe.pos); // IDEA: return a bool indicating if we need to wrap?
@@ -1306,7 +1310,7 @@ pub fn HashMapContext(
 
         /// Returs a const pointer to the current buffer allocation, if any.
         fn getConstBuffer(self: *const Self) ?*const Buffer {
-            if (self.noAlloc()) {
+            if (self.notAllocated()) {
                 @branchHint(.unlikely);
                 return null;
             }
@@ -1421,7 +1425,7 @@ pub fn HashMapContext(
             return if (self.entry_mask == 0) 0 else applyLoadLimit(self.entry_mask);
         }
 
-        fn noAlloc(self: *const Self) bool {
+        fn notAllocated(self: *const Self) bool {
             const zero_capacity = self.entry_mask == 0;
             assert(!zero_capacity or self.metadata == @as([*]const Metadata, @ptrCast(&empty_block)));
             return zero_capacity;
@@ -2104,7 +2108,7 @@ test "reserve" {
     defer map.deinit(tt.allocator);
 
     try map.reserve(tt.allocator, 1);
-    try tt.expect(map.noAlloc() == false);
+    try tt.expect(map.notAllocated() == false);
     try tt.expectEqual(0, map.len);
     try tt.expectEqual(14, map.remaining_capacity);
 }
