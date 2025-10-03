@@ -61,9 +61,9 @@ pub fn autoHashFn(comptime C: type, comptime T: type) (fn (C, T) Hash) {
     }.hash;
 }
 
-/// A global (static) placeholder metadata vector used as default buffer pointer
-/// for allocation-less hash maps.
-var empty_vector: Metadata.Block = Metadata.repeat(.empty);
+/// A global (static) singleton placeholder metadata block used as default
+/// buffer pointer for allocation-less hash maps.
+var empty_block: Metadata.Block = Metadata.repeat(.empty);
 
 /// The comptime configuration options for the HashMap type.
 pub const Options = struct {
@@ -158,7 +158,7 @@ pub fn HashMapContext(
             .len = 0,
             .remaining_capacity = 0,
             .entry_mask = 0,
-            .metadata = @ptrCast(&empty_vector),
+            .metadata = @ptrCast(&empty_block),
             .pointer_stability = .unlocked,
         };
 
@@ -307,7 +307,7 @@ pub fn HashMapContext(
                 kvs: [*]KeyValue,
             },
             /// The start of the metadata array, aligned to the natural
-            /// alignment of a SIMD-aligned block/vector of metadata slots.
+            /// alignment of a SIMD-aligned block of metadata slots.
             ///
             /// The array contains `entries` individual slots followed by a
             /// single block of "mirror" slots, which mirror the state of the
@@ -344,13 +344,15 @@ pub fn HashMapContext(
                 // Set all metadata slots to their empty default state.
                 const buffer: *Buffer = @ptrCast(buf.ptr);
                 const metadata: [*]Metadata.Block = &buffer.metadata;
-                const blocks = entries / Metadata.Block.len;
+
+                const metadata_size = metadataSize(entries);
+                const blocks = metadata_size / @sizeOf(Metadata.Block);
                 @memset(metadata[0..blocks], Metadata.repeat(.empty));
 
                 // Advance memory address to the (unaligned) start of the
                 // key-value or key array.
                 var address = @intFromPtr(metadata);
-                address += metadataSize(entries);
+                address += metadata_size;
 
                 if (comptime multi_array) {
                     // Align the address the key type alignment.
@@ -451,7 +453,7 @@ pub fn HashMapContext(
 
         /// Returns an initialized hash map with sufficient capacity for at
         /// least the given number of entries.
-        pub fn initCapacity(allocator: Allocator, capacity: usize) OOM!Self {
+        pub fn init(allocator: Allocator, capacity: usize) OOM!Self {
             if (capacity == 0)
                 return .empty;
 
@@ -1149,6 +1151,7 @@ pub fn HashMapContext(
             const other_blocks = other.getConstMetadataBlocks();
             for (other_blocks[0 .. other_blocks.len - 1], 0..) |block, v| {
                 const block_idx = v * Metadata.Block.len;
+
                 var used = block.used();
                 while (nextBit(&used)) |idx| {
                     const entry_idx = block_idx + idx;
@@ -1157,17 +1160,13 @@ pub fn HashMapContext(
 
                     const hash, const hint = hashKey(key.*, ctx);
                     const insert_idx = self.findInsertIdx(hash);
-                    self.metadata[insert_idx] = hint;
+                    self.insertMetadata(insert_idx, hint);
                     const new_key = self.getKey(insert_idx);
                     const new_value = self.getValue(insert_idx);
                     new_key.* = key.*;
                     new_value.* = value.*;
                 }
             }
-
-            // Ensure the final metadata block mirrors the first block.
-            const vectors = self.getMetadataBlocks();
-            vectors[vectors.len - 1] = vectors[0];
         }
 
         fn insertKey(self: *Self, entry_idx: usize, key: Key, hint: Metadata) void {
@@ -1221,7 +1220,7 @@ pub fn HashMapContext(
                 // terminating empty value, we might yet find the probed key
                 // later in the sequence.
                 if (insert_idx) |idx| {
-                    if (block.find(.empty)) |_| // maybe check entry_idx first? it's likely the right type
+                    if (self.metadata[idx].isEmpty() or block.find(.empty) != null)
                         return .{ idx, false };
                 }
 
@@ -1254,7 +1253,7 @@ pub fn HashMapContext(
                 if (block.find(.empty)) |_|
                     return null;
 
-                // Try the next vector in the probe sequence.
+                // Try the next block in the probe sequence.
                 _ = probe.next(self.entry_mask);
             }
         }
@@ -1275,6 +1274,7 @@ pub fn HashMapContext(
                 const block = self.getMetadataBlock(probe.pos); // IDEA: return a bool indicating if we need to wrap?
                 if (block.findFree()) |relative_idx| {
                     const entry_idx = metadataIdx(probe, relative_idx) & self.entry_mask;
+                    assert(self.metadata[entry_idx].free);
                     return entry_idx;
                 }
 
@@ -1445,7 +1445,7 @@ pub fn HashMapContext(
         fn noAlloc(self: *const Self) bool {
             const zero_capacity = self.entry_mask == 0;
             if (zero_capacity) {
-                const ptr: [*]const Metadata = @ptrCast(&empty_vector);
+                const ptr: [*]const Metadata = @ptrCast(&empty_block);
                 assert(self.metadata == ptr);
             }
 
@@ -1708,6 +1708,8 @@ const Metadata = packed struct(u8) {
         const len = blockSize(builtin.cpu);
         const mask = len - 1;
 
+        const msb = Block{ .vector = @splat(0x80) };
+
         vector: @Vector(len, u8),
 
         /// Returns the index of first the slot that equals the given metadata.
@@ -1718,6 +1720,8 @@ const Metadata = packed struct(u8) {
 
         /// Returns the index of the first slot that is either empty or deleted.
         fn findFree(self: Block) ?usize {
+            // FIXME: Logically, we want to make sure the MSB is set
+            // const bits: BitMask = @bitCast(self.vector & .msb == .msb);
             const bits: BitMask = @bitCast(self.vector >= Metadata.repeat(.deleted).vector);
             return if (bits == 0) null else @ctz(bits);
         }
@@ -1733,7 +1737,6 @@ const Metadata = packed struct(u8) {
         fn prepareRehash(self: Block) Block {
             // All slots with the MSB set (empty and deleted).
             const pred = self.vector >= Metadata.repeat(.deleted).vector;
-            //const pred = vector & 0x80 != 0;
             // Mark all populated entries as deleted and all others as empty.
             const vector = @select(
                 u8,
@@ -2429,10 +2432,11 @@ test "value iterator" {
 
 const testing = std.testing;
 
-test "insert 1e2 elements" {
-    const n = 100;
-
-    var map: HashMap(u32, u32, .default) = .empty;
+fn testInsertN(n: usize, pre_alloc: bool) !void {
+    var map: HashMap(u32, u32, .default) = if (pre_alloc)
+        try .init(testing.allocator, n)
+    else
+        .empty;
     defer map.deinit(testing.allocator);
 
     var i: u32 = 0;
@@ -2446,48 +2450,23 @@ test "insert 1e2 elements" {
         const value = map.get(i);
         try testing.expectEqual(i, value);
     }
+
+    try testing.expectEqual(n, map.len);
+}
+
+test "insert 1e2 elements" {
+    try testInsertN(100, true);
+    try testInsertN(100, false);
 }
 
 test "insert 1e3 elements" {
-    const n = 1000;
-
-    var map: HashMap(u32, u32, .default) = .empty;
-    defer map.deinit(testing.allocator);
-
-    var i: u32 = 0;
-    while (i < n) : (i += 1) {
-        const prev = map.insertFetch(testing.allocator, i, i);
-        try testing.expectEqual(null, prev);
-    }
-
-    i = 0;
-    while (i < n) : (i += 1) {
-        const value = map.get(i);
-        try testing.expectEqual(i, value);
-    }
-
-    try testing.expectEqual(n, map.len);
+    try testInsertN(1_000, true);
+    try testInsertN(1_000, false);
 }
 
 test "insert 1e6 elements" {
-    const n = 1000;
-
-    var map: HashMap(u32, u32, .default) = .empty;
-    defer map.deinit(testing.allocator);
-
-    var i: u32 = 0;
-    while (i < n) : (i += 1) {
-        const prev = map.insertFetch(testing.allocator, i, i);
-        try testing.expectEqual(null, prev);
-    }
-
-    i = 0;
-    while (i < n) : (i += 1) {
-        const value = map.get(i);
-        try testing.expectEqual(i, value);
-    }
-
-    try testing.expectEqual(n, map.len);
+    try testInsertN(1_000_000, true);
+    try testInsertN(1_000_000, false);
 }
 
 test "remove 1e6 elements randomly" {
@@ -2495,7 +2474,7 @@ test "remove 1e6 elements randomly" {
     const n = 1_000_000;
 
     //var map: HashMap(u32, u32, .default) = .empty;
-    var map: HashMap(u32, u32, .default) = try .initCapacity(testing.allocator, n);
+    var map: HashMap(u32, u32, .default) = try .init(testing.allocator, n);
     defer map.deinit(testing.allocator);
 
     var keys: ArrayList(u32) = .empty;
@@ -2533,5 +2512,3 @@ test "remove 1e6 elements randomly" {
         try testing.expectEqual(key, prev);
     }
 }
-
-const HM = std.hash_map.HashMapUnmanaged;
