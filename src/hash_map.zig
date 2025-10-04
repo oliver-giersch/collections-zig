@@ -1,6 +1,3 @@
-// TODO: reimplement AutoContext
-// TODO:
-
 pub fn HashMap(comptime K: type, V: type, comptime O: Options) type {
     return HashMapContext(K, V, std.hash_map.AutoContext(K), O);
 }
@@ -113,7 +110,10 @@ pub const Options = struct {
     /// The probing strategy used for resolving hash conflicts.
     probing_strategy: ProbingStrategy = .triangular,
     /// The maximum load percentage before the map is resized.
-    max_load_percentage: u8 = 88, // round-up from 87.5, i.e. 1/8th
+    ///
+    /// This value may be rounded down to facilitate faster calculation at
+    /// runtime, e.g., 88% would be rounded down to 87.5% (1/8th).
+    max_load_percentage: u8 = 88,
 };
 
 /// The strategy for cloning the contents of a map.
@@ -135,6 +135,7 @@ pub const Options = struct {
 /// For maps that never had any entries removed from them, the former option is
 /// always better and preferrable.
 pub const CloneMode = enum {
+    /// The default mode for cloning.
     pub const default: CloneMode = .memcpy;
 
     /// Copy the contents of the map 1:1.
@@ -180,23 +181,53 @@ pub fn HashMapContext(
         pub const options = O;
 
         /// An unordered iterator over key-value const pointers.
+        ///
+        /// The iterator only remains valid for the lifetime of the hashmap.
+        /// Any operations that alter the state of the hash map invalidate
+        /// any existing iterators and may lead to undefined behavior when
+        /// executed during iteration, whereas any operations the are read-only
+        /// or only modify stored values are always safe.
         pub const ConstIterator = GenericIterator(true);
         /// An unordered iterator over key-value pointers.
+        ///
+        /// The iterator only remains valid for the lifetime of the hashmap.
+        /// Any operations that alter the state of the hash map invalidate
+        /// any existing iterators and may lead to undefined behavior when
+        /// executed during iteration, whereas any operations the are read-only
+        /// or only modify stored values are always safe.
         pub const Iterator = GenericIterator(false);
         /// An unordered iterator over value const pointers.
+        ///
+        /// The iterator only remains valid for the lifetime of the hashmap.
+        /// Any operations that alter the state of the hash map invalidate
+        /// any existing iterators and may lead to undefined behavior when
+        /// executed during iteration, whereas any operations the are read-only
+        /// or only modify stored values are always safe.
         pub const ConstValueIterator = GenericValueIterator(true);
         /// An unordered iterator over value pointers.
+        ///
+        /// The iterator only remains valid for the lifetime of the hashmap.
+        /// Any operations that alter the state of the hash map invalidate
+        /// any existing iterators and may lead to undefined behavior when
+        /// executed during iteration, whereas any operations the are read-only
+        /// or only modify stored values are always safe.
         pub const ValueIterator = GenericValueIterator(false);
 
         /// An unordered iterator over const key pointers.
+        ///
+        /// The iterator only remains valid for the lifetime of the hashmap.
+        /// Any operations that alter the state of the hash map invalidate
+        /// any existing iterators and may lead to undefined behavior when
+        /// executed during iteration, whereas any operations the are read-only
+        /// or only modify stored values are always safe.
         pub const KeyIterator = struct {
             map: *const Self,
             it: EntryIterator,
 
             /// Returns the next key const pointer in the iterator sequence.
             ///
-            /// The keys are iterated in a deterministic but implementation
-            /// defined order.
+            /// The entires are iterated in a deterministic but implementation
+            /// defined order without a particular meaning.
             pub fn next(self: *KeyIterator) ?*const Key {
                 const entry_idx = self.it.next(self.map) orelse return null;
                 return self.map.getConstKey(entry_idx);
@@ -234,6 +265,7 @@ pub fn HashMapContext(
 
         fn GenericValueIterator(comptime is_const: bool) type {
             return struct {
+                /// The value pointer type returned by each iteration.
                 pub const Item = if (is_const) *const Value else *Value;
                 const MapPointer = if (is_const) *const Self else *Self;
 
@@ -300,7 +332,7 @@ pub fn HashMapContext(
             else
                 @alignOf(Metadata.Block);
 
-            /// The alignment of the buffer struct.
+            /// The alignment of the buffer type.
             const buffer_alignment = @max(@alignOf(Buffer), metadata_alignment, if (multi_array)
                 @max(key_align, value_align)
             else
@@ -368,7 +400,7 @@ pub fn HashMapContext(
                 address += metadata_size;
 
                 if (comptime multi_array) {
-                    // Align the address the key type alignment.
+                    // Align the address to the key type alignment.
                     address = Alignment.of(Key).forward(address);
                     const keys: [*]Key = @ptrFromInt(address);
                     @memset(keys[0..entries], undefined);
@@ -408,16 +440,16 @@ pub fn HashMapContext(
             }
         };
 
-        const KeyValue = struct {
-            key: Key,
-            value: Value,
-        };
-
         // The abstraction for the comptime-selected probing strategy.
         const Probe = switch (options.probing_strategy) {
             .linear => LinearProbe,
             .triangular => TriangularProbe,
             .cache_line => CacheLineProbe,
+        };
+
+        const KeyValue = struct {
+            key: Key,
+            value: Value,
         };
 
         const load_factor_nths = nths(options.max_load_percentage);
@@ -980,6 +1012,9 @@ pub fn HashMapContext(
             const hash, const hint = hashKey(key, ctx);
             var probe = self.probeHash(hash);
 
+            // Probe the sequence until the key is found. If the key is the last
+            // populated one in this sequence, its entry can be reset to a clean
+            // empty state and its capacity restored.
             const entry_idx = self.probeGetIdx(&probe, key, hint, ctx) orelse return null;
             if (self.isLastInSequence(&probe, entry_idx)) {
                 self.remaining_capacity += 1;
@@ -988,7 +1023,6 @@ pub fn HashMapContext(
             self.len -= 1;
 
             const value = self.getValue(entry_idx).*;
-
             self.getKey(entry_idx).* = undefined;
             self.getValue(entry_idx).* = undefined;
 
@@ -1005,6 +1039,7 @@ pub fn HashMapContext(
             const relative_idx = self.getRelativeIdx(probe.pos, entry_idx);
             assert(relative_idx < Metadata.Block.len);
             if (relative_idx < Metadata.Block.len - 1) {
+                @branchHint(.likely);
                 // Check, if there is a subsequent empty slot after the entry
                 // index in same block relative to the last probing position.
                 return self.metadata[entry_idx + 1].isEmpty();
@@ -1102,7 +1137,7 @@ pub fn HashMapContext(
                     const metadata = self.metadata[entry_idx];
                     self.metadata[entry_idx] = hint;
 
-                    if (metadata == Metadata.empty) {
+                    if (metadata.isEmpty()) {
                         // The insertion index is empty and therefore free to
                         // use. Copy the key and value into their new slot and
                         // move on to the next index.
@@ -1985,6 +2020,10 @@ fn nths(percent: u8) usize {
     return if (percent == 100) 100 else 100 / (100 - percent);
 }
 
+comptime {
+    _ = @import("hash_map_tests.zig");
+}
+
 const std = @import("std");
 const builtin = @import("builtin");
 
@@ -2101,6 +2140,19 @@ test "insert and contains" {
     try tt.expectEqual(1, map.len);
     try tt.expectEqual(true, map.contains(1));
     try tt.expectEqual(false, map.contains(2));
+}
+
+test "insert and get" {
+    const allocator = testing.allocator;
+
+    var map: HashMap(u32, u32, .default) = .empty;
+    defer map.deinit(allocator);
+
+    try map.insert(allocator, 1, 2);
+    try map.insert(allocator, 2, 4);
+    try tt.expectEqual(2, map.len);
+    try tt.expectEqual(2, map.get(1));
+    try tt.expectEqual(4, map.get(2));
 }
 
 test "reserve" {
