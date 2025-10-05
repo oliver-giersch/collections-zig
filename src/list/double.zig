@@ -140,72 +140,7 @@ pub const Queue = extern struct {
     pub const ConstReverseIterator = GenericIterator(.reverse, true);
     pub const ReverseIterator = GenericIterator(.reverse, false);
 
-    pub const Cursor = struct {
-        queue: *Queue,
-        ptr: *?*Self.Link,
-
-        pub fn peekNext(self: *Cursor) ?*Self.Link {
-            return self.ptr.* orelse return null;
-        }
-
-        pub fn moveNext(self: *Cursor) ?*Self.Link {
-            const link = self.peekNext() orelse return null;
-            self.ptr = &link.next;
-            return link;
-        }
-
-        test moveNext {
-            var queue: Queue = undefined;
-            queue.empty();
-
-            var links: [4]Queue.Link = undefined;
-            for (&links) |link|
-                queue.insertTail(link);
-
-            var cur = queue.cursor();
-            try tt.expectEqual(&links[0], cur.moveNext());
-            try tt.expectEqual(&links[1], cur.moveNext());
-            try tt.expectEqual(&links[2], cur.moveNext());
-            try tt.expectEqual(&links[3], cur.moveNext());
-            try tt.expectEqual(null, cur.moveNext());
-        }
-
-        pub fn insertNext(self: *Cursor, link: *Self.Link) void {
-            assert(!self.queue.contains(link));
-
-            link.next = self.peekNext();
-            link.prev = self.ptr;
-            self.ptr.* = link;
-            if (link.next == null) {
-                @branchHint(.unlikely);
-                self.queue.tail = &link.next;
-            }
-        }
-
-        pub fn removeNext(self: *Cursor) ?*Self.Link {
-            const link = self.peekNext() orelse return null;
-            self.ptr.* = link.next;
-            if (link.next) |next| {
-                @branchHint(.likely);
-                next.prev = self.ptr;
-            } else {
-                self.queue.tail = self.ptr;
-            }
-
-            link.* = undefined;
-            return link;
-        }
-
-        pub fn peekPrev(self: *const Cursor) ?*Self.Link {
-            return getLink(self.ptr) orelse return null;
-        }
-
-        pub fn movePrev(self: *Cursor) ?*Self.Link {
-            const link = self.peekPrev() orelse return null;
-            self.ptr = link.prev;
-            return link;
-        }
-    };
+    pub const Cursor = double.Cursor;
 
     fn GenericIterator(
         comptime direction: enum { forward, reverse },
@@ -268,6 +203,14 @@ pub const Queue = extern struct {
         return Mixin(Self).len(self);
     }
 
+    pub fn get(self: *Self, idx: usize) ?*Self.Link {
+        return Mixin(Self).get(self, idx);
+    }
+
+    pub fn getConst(self: *const Self, idx: usize) ?*const Self.Link {
+        return Mixin(Self).getConst(self, idx);
+    }
+
     pub fn constIter(self: *const Self) ConstForwardIterator {
         return .{ .link = self.head };
     }
@@ -284,7 +227,7 @@ pub const Queue = extern struct {
         return .{ .link = getLink(self.tail) };
     }
 
-    pub fn cursor(self: *Self) Cursor {
+    pub fn cursor(self: *Self) Self.Cursor {
         return .{ .ptr = &self.head, .queue = self };
     }
 
@@ -369,6 +312,93 @@ pub const Queue = extern struct {
         }
 
         return maybe_link;
+    }
+};
+
+pub const Cursor = struct {
+    queue: *Queue,
+    ptr: *?*Link,
+
+    pub fn peekNext(self: *Cursor) ?*Link {
+        return self.ptr.* orelse return null;
+    }
+
+    pub fn moveNext(self: *Cursor) ?*Link {
+        const link = self.peekNext() orelse return null;
+        self.ptr = &link.next;
+        return link;
+    }
+
+    test moveNext {
+        var queue: Queue = undefined;
+        queue.empty();
+
+        var links: [4]Queue.Link = undefined;
+        for (&links) |*link|
+            queue.insertTail(link);
+
+        var cur = queue.cursor();
+        try tt.expectEqual(&links[0], cur.moveNext());
+        try tt.expectEqual(&links[1], cur.moveNext());
+        try tt.expectEqual(&links[2], cur.moveNext());
+        try tt.expectEqual(&links[3], cur.moveNext());
+        try tt.expectEqual(null, cur.moveNext());
+    }
+
+    pub fn insertNext(self: *Cursor, link: *Link) void {
+        assert(!self.queue.contains(link));
+
+        link.next = self.peekNext();
+        link.prev = self.ptr;
+        self.ptr.* = link;
+        if (link.next == null) {
+            @branchHint(.unlikely);
+            self.queue.tail = &link.next;
+        }
+    }
+
+    test insertNext {
+        var queue: Queue = undefined;
+        queue.empty();
+
+        var links: [4]Queue.Link = undefined;
+        queue.insertTail(&links[0]);
+        queue.insertTail(&links[1]);
+        queue.insertTail(&links[3]);
+
+        var cur = queue.cursor();
+        try tt.expectEqual(&links[0], cur.moveNext());
+        try tt.expectEqual(&links[1], cur.moveNext());
+        cur.insertNext(&links[2]);
+        try tt.expectEqual(&links[2], cur.moveNext());
+        try tt.expectEqual(&links[3], cur.moveNext());
+
+        for (&links, 0..) |*link, i|
+            try tt.expectEqual(link, queue.get(i));
+    }
+
+    pub fn removeNext(self: *Cursor) ?*Link {
+        const link = self.peekNext() orelse return null;
+        self.ptr.* = link.next;
+        if (link.next) |next| {
+            @branchHint(.likely);
+            next.prev = self.ptr;
+        } else {
+            self.queue.tail = self.ptr;
+        }
+
+        link.* = undefined;
+        return link;
+    }
+
+    pub fn peekPrev(self: *const Cursor) ?*Link {
+        return Queue.getLink(self.ptr) orelse return null;
+    }
+
+    pub fn movePrev(self: *Cursor) ?*Link {
+        const link = self.peekPrev() orelse return null;
+        self.ptr = link.prev;
+        return link;
     }
 };
 
