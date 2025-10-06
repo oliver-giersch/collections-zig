@@ -2,14 +2,15 @@ const hash_map = @import("hash_map.zig");
 
 const ArrayList = @import("array_list.zig").ArrayList;
 const HashMap = hash_map.HashMap;
+const Options = hash_map.Options;
 
-inline fn getConfigurations() []const hash_map.Options {
-    const layouts: []const hash_map.Options.Layout = &.{ .array, .multi_array };
-    const probing_strategies: []const hash_map.Options.ProbingStrategy = &.{ .linear, .triangular, .cache_line };
+inline fn getConfigurations() []const Options {
+    const layouts: []const Options.Layout = &.{ .array, .multi_array };
+    const probing_strategies: []const Options.ProbingStrategy = &.{ .linear, .triangular, .cache_line };
     const load_percentages: []const u8 = &.{ 50, 66, 88, 100 };
 
     const len = layouts.len * probing_strategies.len * load_percentages.len;
-    var configurations: [len]hash_map.Options = undefined;
+    var configurations: [len]Options = undefined;
 
     var i: usize = 0;
     for (layouts) |layout| {
@@ -31,7 +32,7 @@ inline fn getConfigurations() []const hash_map.Options {
 
 const cfgs = getConfigurations();
 
-fn testAllocationFailure(comptime options: hash_map.Options) !void {
+fn testAllocationFailure(comptime options: Options) !void {
     var map: HashMap(u32, u32, options) = .empty;
     defer map.deinit(testing.allocator);
 
@@ -43,11 +44,7 @@ fn testAllocationFailure(comptime options: hash_map.Options) !void {
     try testing.expectError(oom, map.getOrInsertKey(testing.failing_allocator, 1));
 }
 
-fn testInsertN(
-    comptime options: hash_map.Options,
-    n: usize,
-    pre_alloc: bool,
-) !void {
+fn testInsertN(comptime options: Options, n: usize, pre_alloc: bool) !void {
     var map: HashMap(u32, u32, options) = if (pre_alloc)
         try .init(testing.allocator, n)
     else
@@ -69,7 +66,7 @@ fn testInsertN(
     try testing.expectEqual(n, map.len);
 }
 
-fn testGetOrInsertSum(comptime options: hash_map.Options) !void {
+fn testGetOrInsertSum(comptime options: Options) !void {
     var map: HashMap(u32, u32, options) = .empty;
     defer map.deinit(testing.allocator);
 
@@ -92,7 +89,7 @@ fn testGetOrInsertSum(comptime options: hash_map.Options) !void {
     try testing.expectEqual(30, sum);
 }
 
-fn testRehashN(comptime options: hash_map.Options, n: usize) !void {
+fn testRehashN(comptime options: Options, n: usize) !void {
     var map: HashMap(u32, u32, options) = .empty;
     defer map.deinit(testing.allocator);
 
@@ -123,7 +120,7 @@ fn testRehashN(comptime options: hash_map.Options, n: usize) !void {
     try testing.expectEqual((n / 3) * 2, map.len);
 
     i = 0;
-    while (i < n) : (n += 1) {
+    while (i < n) : (i += 1) {
         if (@mod(i, 3) == 0)
             try testing.expectEqual(null, map.get(i))
         else
@@ -131,7 +128,60 @@ fn testRehashN(comptime options: hash_map.Options, n: usize) !void {
     }
 }
 
-fn testValueIteratorN(comptime options: hash_map.Options, n: usize) !void {
+fn testKeyValueIteratorN(comptime options: Options, n: usize) !void {
+    var map: HashMap(u32, u32, options) = .empty;
+    defer map.deinit(testing.allocator);
+
+    var i: u32 = 0;
+    while (i < n) : (i += 1) {
+        const value = map.insertFetch(testing.allocator, i, i * 2);
+        try testing.expectEqual(null, value);
+    }
+
+    var keys: ArrayList(u32) = .empty;
+    var values: ArrayList(u32) = .empty;
+
+    var it = map.constIter();
+    while (it.next()) |kv| {
+        try testing.expectEqual(2 * kv.key.*, kv.value.*);
+        try keys.push(testing.allocator, kv.key.*);
+        try values.push(testing.allocator, kv.value.*);
+    }
+
+    mem.sort(u32, keys.bounded.items, {}, sort.asc(u32));
+    mem.sort(u32, values.bounded.items, {}, sort.asc(u32));
+
+    i = 0;
+    while (i < n) : (i += 1) {
+        try testing.expectEqual(i, keys.bounded.items[i]);
+        try testing.expectEqual(i * 2, values.bounded.items[i]);
+    }
+}
+
+fn testKeyIteratorN(comptime options: Options, n: usize) !void {
+    var map: HashMap(u32, u32, options) = .empty;
+    defer map.deinit(testing.allocator);
+
+    var i: u32 = 0;
+    while (i < n) : (i += 1) {
+        try map.insert(testing.allocator, i, i);
+    }
+
+    var keys: ArrayList(u32) = .empty;
+    var it = map.keyIter();
+    while (it.next()) |key| {
+        try keys.push(testing.allocator, key.*);
+    }
+
+    mem.sort(u32, keys.bounded.items, {}, sort.asc(u32));
+
+    i = 0;
+    while (i < n) : (i += 1) {
+        try testing.expectEqual(i, keys.bounded.items[i]);
+    }
+}
+
+fn testValueIteratorN(comptime options: Options, n: usize) !void {
     var map: HashMap(u32, u32, options) = .empty;
     defer map.deinit(testing.allocator);
 
@@ -142,6 +192,7 @@ fn testValueIteratorN(comptime options: hash_map.Options, n: usize) !void {
     }
 
     var values: ArrayList(u32) = try .init(testing.allocator, n);
+    defer values.deinit(testing.allocator);
     {
         var it = map.valueIter();
         while (it.next()) |value| {
@@ -159,6 +210,50 @@ fn testValueIteratorN(comptime options: hash_map.Options, n: usize) !void {
     i = 0;
     while (i < n) : (i += 1) {
         try testing.expectEqual(i * 4, values.bounded.items[i]);
+    }
+}
+
+fn testRandomInsertRemoveN(
+    comptime options: Options,
+    n: usize,
+    pre_alloc: bool,
+) !void {
+    var map: HashMap(u32, u32, options) = if (pre_alloc)
+        try .init(testing.allocator, n)
+    else
+        .empty;
+    defer map.deinit(testing.allocator);
+
+    var keys: ArrayList(u32) = .empty;
+    defer keys.deinit(testing.allocator);
+
+    var i: u32 = 0;
+    while (i < n) : (i += 1) {
+        try keys.push(testing.allocator, i);
+    }
+
+    var prng = std.Random.DefaultPrng.init(testing.random_seed);
+    const random = prng.random();
+    random.shuffle(u32, keys.bounded.items);
+
+    for (keys.bounded.items) |key| {
+        try map.insert(testing.allocator, key, key);
+    }
+
+    i = 0;
+    while (i < n) : (i += 1) {
+        try testing.expect(map.contains(i));
+        const value = map.get(i);
+        try testing.expectEqual(i, value);
+    }
+
+    random.shuffle(u32, keys.bounded.items);
+    i = 0;
+
+    while (i < n) : (i += 1) {
+        const key = keys.bounded.items[i];
+        const value = map.removeFetch(key);
+        try testing.expectEqual(key, value);
     }
 }
 
@@ -209,6 +304,27 @@ test "value iterator 1e2" {
 test "value iterator 1e3" {
     inline for (cfgs) |options| {
         try testValueIteratorN(options, 1_000);
+    }
+}
+
+test "random insert/remove 1e2" {
+    inline for (cfgs) |options| {
+        try testRandomInsertRemoveN(options, 100, true);
+        try testRandomInsertRemoveN(options, 100, false);
+    }
+}
+
+test "random insert/remove 1e3" {
+    inline for (cfgs) |options| {
+        try testRandomInsertRemoveN(options, 1_000, true);
+        try testRandomInsertRemoveN(options, 1_000, false);
+    }
+}
+
+test "random insert/remove 1e6" {
+    inline for (cfgs) |options| {
+        try testRandomInsertRemoveN(options, 1_000_000, true);
+        try testRandomInsertRemoveN(options, 1_000_000, false);
     }
 }
 
