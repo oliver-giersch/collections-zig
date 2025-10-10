@@ -1036,8 +1036,7 @@ pub fn HashMapContext(
             probe: *Probe,
             entry_idx: usize,
         ) bool {
-            const relative_idx = self.getRelativeIdx(probe.pos, entry_idx);
-            assert(relative_idx < Metadata.Block.len);
+            const relative_idx = self.getRelativeIdx(probe, entry_idx) orelse unreachable;
             if (relative_idx < Metadata.Block.len - 1) {
                 @branchHint(.likely);
                 // Check, if there is a subsequent empty slot after the entry
@@ -1124,7 +1123,7 @@ pub fn HashMapContext(
                     // the old index, allow the entry to remain in its previous
                     // place.
                     const entry_idx = self.probeInsertIdx(&probe);
-                    if (self.getBlockIdx(probe.pos, i) == self.getBlockIdx(probe.pos, entry_idx)) {
+                    if (self.isInSameBlock(&probe, i)) {
                         @branchHint(.likely);
                         self.metadata[i] = hint;
                         continue :outer;
@@ -1440,25 +1439,19 @@ pub fn HashMapContext(
             return @truncate(hash & self.entry_mask);
         }
 
-        fn getBlockIdx(self: *const Self, base_idx: usize, entry_idx: usize) usize {
-            return self.getRelativeIdx(base_idx, entry_idx) / Metadata.Block.len;
+        fn isInSameBlock(self: *const Self, probe: *const Probe, entry_idx: usize) bool {
+            return self.getRelativeIdx(probe, entry_idx) != null;
         }
 
-        fn getRelativeIdx(self: *const Self, base_idx: usize, entry_idx: usize) usize {
-            if (comptime options.probing_strategy == .cache_line) {
-                const base_base = base_idx & cache_line.mask;
-                const entry_base = entry_idx & cache_line.mask;
-                const diff = entry_idx - entry_base;
-            }
+        fn getRelativeIdx(self: *const Self, probe: *const Probe, entry_idx: usize) ?usize {
+            const diff = entry_idx -% probe.pos;
+            const relative_idx = if (comptime options.probing_strategy == .cache_line) blk: {
+                if ((probe.pos & cache_line.mask) != (entry_idx & cache_line.mask))
+                    return null;
+                break :blk diff & (cache_line.len - 1) & self.entry_mask;
+            } else diff & self.entry_mask;
 
-            const relative_idx = entry_idx -% base_idx;
-            if (comptime options.probing_strategy == .cache_line) {
-                // FIXME: for 507 and 517 returns 10, but should return .. something vastly different
-                if ((base_idx & cache_line.mask) == (entry_idx & cache_line.mask))
-                    return relative_idx & (cache_line.len - 1);
-            }
-
-            return relative_idx & self.entry_mask;
+            return if (relative_idx < Metadata.Block.len) relative_idx else null;
         }
 
         fn getMirrorIdx(self: *const Self, entry_idx: usize) usize {
@@ -1872,10 +1865,7 @@ const CacheLineProbe = struct {
     }
 
     fn next(self: *CacheLineProbe, entry_mask: usize) usize {
-        const cache_line_base = self.origin & cache_line.mask;
-        const next_offset = (self.pos + Metadata.Block.len) & (cache_line.len - 1);
-        const next_pos = (cache_line_base | next_offset) & entry_mask;
-
+        const next_pos = self.nextPos(entry_mask);
         if (self.origin != next_pos) {
             @branchHint(.likely);
             self.pos = next_pos;
@@ -1885,6 +1875,12 @@ const CacheLineProbe = struct {
         self.pos = (self.origin + cache_line.len) & entry_mask;
         self.origin = self.pos;
         return self.pos;
+    }
+
+    fn nextPos(self: *const CacheLineProbe, entry_mask: usize) usize {
+        const cache_line_base = self.origin & cache_line.mask;
+        const next_offset = (self.pos + Metadata.Block.len) & (cache_line.len - 1);
+        return (cache_line_base | next_offset) & entry_mask;
     }
 };
 
@@ -2059,13 +2055,6 @@ fn overflowingMul(a: usize, b: usize) Allocator.Error!usize {
     return res;
 }
 
-const Log2Int = math.Log2Int(usize);
-
-fn log2(v: usize) Log2Int {
-    const bits = @bitSizeOf(usize);
-    return @intCast(bits - 1 - @clz(v - 1));
-}
-
 fn nths(percent: u8) usize {
     assert(percent >= 50 and percent <= 100);
     return if (percent == 100) 100 else 100 / (100 - percent);
@@ -2161,16 +2150,6 @@ test "entries for capacity" {
     try tt.expectEqual(32, MapLoad100.entriesForCapacity(31));
     try tt.expectEqual(256, MapLoad100.entriesForCapacity(255));
     try tt.expectEqual(127, MapLoad100.applyLoadLimit(128 - 1));
-}
-
-test "get relative index" {
-    const options: Options = .{ .probing_strategy = .cache_line };
-
-    var map_cl: HashMap(u32, u32, options) = try .init(testing.allocator, 1024);
-    defer map_cl.deinit(testing.allocator);
-
-    try testing.expectEqual(0, map_cl.getRelativeIdx(507, 507));
-    try testing.expectEqual(0, map_cl.getRelativeIdx(507, 517));
 }
 
 test "empty map" {

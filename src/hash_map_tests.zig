@@ -277,10 +277,6 @@ test "insert 1e3 key-value pairs" {
     }
 }
 
-test "debug test" {
-    try testRehashN(cfgs[11], 1000);
-}
-
 test "rehash 1e2 key-value pairs" {
     inline for (cfgs) |options| {
         try testRehashN(options, 100);
