@@ -1445,11 +1445,20 @@ pub fn HashMapContext(
         }
 
         fn getRelativeIdx(self: *const Self, base_idx: usize, entry_idx: usize) usize {
+            if (comptime options.probing_strategy == .cache_line) {
+                const base_base = base_idx & cache_line.mask;
+                const entry_base = entry_idx & cache_line.mask;
+                const diff = entry_idx - entry_base;
+            }
+
             const relative_idx = entry_idx -% base_idx;
-            return if (comptime options.probing_strategy == .cache_line)
-                relative_idx & (cache_line.len - 1) & self.entry_mask
-            else
-                relative_idx & self.entry_mask;
+            if (comptime options.probing_strategy == .cache_line) {
+                // FIXME: for 507 and 517 returns 10, but should return .. something vastly different
+                if ((base_idx & cache_line.mask) == (entry_idx & cache_line.mask))
+                    return relative_idx & (cache_line.len - 1);
+            }
+
+            return relative_idx & self.entry_mask;
         }
 
         fn getMirrorIdx(self: *const Self, entry_idx: usize) usize {
@@ -2152,6 +2161,16 @@ test "entries for capacity" {
     try tt.expectEqual(32, MapLoad100.entriesForCapacity(31));
     try tt.expectEqual(256, MapLoad100.entriesForCapacity(255));
     try tt.expectEqual(127, MapLoad100.applyLoadLimit(128 - 1));
+}
+
+test "get relative index" {
+    const options: Options = .{ .probing_strategy = .cache_line };
+
+    var map_cl: HashMap(u32, u32, options) = try .init(testing.allocator, 1024);
+    defer map_cl.deinit(testing.allocator);
+
+    try testing.expectEqual(0, map_cl.getRelativeIdx(507, 507));
+    try testing.expectEqual(0, map_cl.getRelativeIdx(507, 517));
 }
 
 test "empty map" {
