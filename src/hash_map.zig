@@ -1,3 +1,8 @@
+// TODO:
+// a) check for ways to improve code size maybe? look for code sections that don't
+//    involve keys/values, or (less relevant) options
+// b) use a setKV function for brevity!
+
 pub fn HashMap(comptime K: type, V: type, comptime O: Options) type {
     return HashMapContext(K, V, std.hash_map.AutoContext(K), O);
 }
@@ -1015,39 +1020,45 @@ pub fn HashMapContext(
             // Probe the sequence until the key is found. If the key is the last
             // populated one in this sequence, its entry can be reset to a clean
             // empty state and its capacity restored.
-            const entry_idx = self.probeGetIdx(&probe, key, hint, ctx) orelse return null;
-            if (self.isLastInSequence(&probe, entry_idx)) {
-                self.remaining_capacity += 1;
-                self.insertMetadata(entry_idx, .empty);
-            } else self.insertMetadata(entry_idx, .deleted);
-            self.len -= 1;
+            const entry_idx = self.probeGetIdx(&probe, key, hint, ctx) orelse
+                return null;
 
+            const entry_idx_before = entry_idx -% Metadata.Block.len & self.entry_mask;
+            const empty_before: usize = @clz(self.getMetadataBlock(entry_idx_before).findAll(.empty));
+            const empty_after: usize = @ctz(self.getMetadataBlock(entry_idx).findAll(.empty));
+
+            // FIXME: still broken with cache-line probing
+            const end_of_sequence = (empty_before + empty_after) < Metadata.Block.len;
+            const metadata: Metadata = if (!end_of_sequence) .deleted else blk: {
+                self.remaining_capacity += 1;
+                break :blk .empty;
+            };
+
+            self.insertMetadata(entry_idx, metadata);
             const value = self.getValue(entry_idx).*;
-            self.getKey(entry_idx).* = undefined;
-            self.getValue(entry_idx).* = undefined;
+            self.setKV(entry_idx, undefined, undefined);
+            self.len -= 1;
 
             return value;
         }
 
         pub const removeFetch = if (is_zst_ctx) zst_ctx.removeFetch else {};
 
+        // FIXME: without this, removal works correctly ... where is the bug?
         fn isLastInSequence(
             self: *const Self,
             probe: *Probe,
-            entry_idx: usize,
+            relative_idx: usize,
         ) bool {
-            const relative_idx = self.getRelativeIdx(probe, entry_idx) orelse unreachable;
-            if (relative_idx < Metadata.Block.len - 1) {
-                @branchHint(.likely);
-                // Check, if there is a subsequent empty slot after the entry
-                // index in same block relative to the last probing position.
-                return self.metadata[entry_idx + 1].isEmpty();
-            } else {
-                // Otherwise, check if the next slot in the probing sequence
-                // is empty.
-                const next = probe.next(self.entry_mask);
-                return self.metadata[next].isEmpty();
-            }
+            // Check, if there is a subsequent empty slot after the entry
+            // index in same block relative to the last probing position.
+            // Otherwise, check if the next slot in the probing sequence
+            // is empty.
+            const next = if (relative_idx == Metadata.Block.len - 1)
+                probe.next(self.entry_mask)
+            else
+                metadataIdx(probe, relative_idx + 1);
+            return self.metadata[next].isEmpty();
         }
 
         fn grow(
@@ -1175,8 +1186,7 @@ pub fn HashMapContext(
                     const hash, const hint = hashKey(key.*, ctx);
                     const insert_idx = self.findInsertIdx(hash);
                     self.insertMetadata(insert_idx, hint);
-                    self.getKey(insert_idx).* = key.*;
-                    self.getValue(insert_idx).* = value.*;
+                    self.setKV(insert_idx, key.*, value.*);
                 }
             }
         }
@@ -1237,6 +1247,46 @@ pub fn HashMapContext(
                         return .{ idx, false };
                 }
 
+                _ = probe.next(self.entry_mask);
+            }
+        }
+
+        fn probeGetRemoveIdx(self: *Self, probe: *Probe, key: Key, hint: Metadata, ctx: Context) ?usize {
+            while (true) {
+                // Search for a metadata block containing the correct hash hint
+                // for the queried key in accordance with the probing sequence.
+                const block = self.getMetadataBlock(probe.pos);
+
+                // Search for any matching metadata slot and equal key.
+                var matches = block.findAll(hint);
+                while (nextBit(&matches)) |relative_idx| {
+                    const metadata_idx = metadataIdx(probe, relative_idx);
+                    const entry_idx = self.eqlKey(key, hint, metadata_idx, ctx) orelse continue;
+
+                    var is_last: bool = false;
+                    if (relative_idx < Metadata.Block.len - 1) {
+                        const metadata_idx_next = metadataIdx(probe, relative_idx + 1);
+                        is_last = self.metadata[metadata_idx_next].isEmpty();
+                    } else {
+                        const next = probe.next(self.entry_mask);
+                        is_last = self.metadata[next].isEmpty();
+                    }
+
+                    //if (false and is_last) {
+                    //    self.remaining_capacity += 1;
+                    //    self.insertMetadata(entry_idx, .empty);
+                    //} else {
+                    //    self.insertMetadata(entry_idx, .deleted);
+                    //}
+                    self.insertMetadata(entry_idx, .deleted);
+                }
+
+                // Upon encountering an empty slot within a probed block stop
+                // searching further.
+                if (block.find(.empty)) |_|
+                    return null;
+
+                // Try the next block in the probe sequence.
                 _ = probe.next(self.entry_mask);
             }
         }
@@ -1426,6 +1476,11 @@ pub fn HashMapContext(
                 &buffer.header.values[entry_idx]
             else
                 &buffer.header.kvs[entry_idx].value;
+        }
+
+        fn setKV(self: *Self, entry_idx: usize, key: Key, value: Value) void {
+            self.getKey(entry_idx).* = key;
+            self.getValue(entry_idx).* = value;
         }
 
         /// Returns the current number of entries in the buffer, including the
