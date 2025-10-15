@@ -1023,7 +1023,10 @@ pub fn HashMapContext(
             const entry_idx = self.probeGetIdx(&probe, key, hint, ctx) orelse
                 return null;
 
-            const entry_idx_before = entry_idx -% Metadata.Block.len & self.entry_mask;
+            const entry_idx_before = if (comptime options.probing_strategy == .cache_line)
+                probe.prev(self.entry_mask)
+            else
+                entry_idx -% Metadata.Block.len & self.entry_mask;
             const empty_before: usize = @clz(self.getMetadataBlock(entry_idx_before).findAll(.empty));
             const empty_after: usize = @ctz(self.getMetadataBlock(entry_idx).findAll(.empty));
 
@@ -1912,36 +1915,47 @@ const TriangularProbe = struct {
 
 /// A cache-line probing sequence.
 const CacheLineProbe = struct {
+    base: usize,
     pos: usize,
-    origin: usize,
+    relative_pos: u16,
+    origin: u16,
 
     fn start(entry_idx: usize) CacheLineProbe {
-        return .{ .pos = entry_idx, .origin = entry_idx };
+        const base = entry_idx & cache_line.mask;
+        const origin: u16 = @intCast(entry_idx - base);
+        return .{
+            .base = base,
+            .pos = entry_idx,
+            .relative_pos = origin,
+            .origin = origin,
+        };
     }
 
     fn next(self: *CacheLineProbe, entry_mask: usize) usize {
-        const next_pos = self.nextPos(entry_mask);
+        const block_len: u16 = Metadata.Block.len;
+        const next_pos = (self.relative_pos + block_len) & (cache_line.len - 1);
+
         if (self.origin != next_pos) {
             @branchHint(.likely);
-            self.pos = next_pos;
-            return self.pos;
+            self.relative_pos = next_pos;
+        } else {
+            self.base += cache_line.len;
+            self.relative_pos = self.origin;
         }
 
-        self.pos = (self.origin + cache_line.len) & entry_mask;
-        self.origin = self.pos;
+        self.pos = (self.base + self.relative_pos) & entry_mask;
         return self.pos;
     }
 
-    fn nextPos(self: *const CacheLineProbe, entry_mask: usize) usize {
-        const cache_line_base = self.origin & cache_line.mask;
-        const next_offset = (self.pos + Metadata.Block.len) & (cache_line.len - 1);
-        return (cache_line_base | next_offset) & entry_mask;
+    fn prev(self: *const CacheLineProbe, entry_mask: usize) usize {
+        const prev_pos: u16 = @intCast((self.relative_pos -% Metadata.Block.len) & (cache_line.len - 1));
+        return (self.base + prev_pos) & entry_mask;
     }
 };
 
 const cache_line = struct {
-    const len: usize = std.atomic.cache_line;
-    const mask: usize = ~@as(usize, cache_line.len - 1);
+    const len = std.atomic.cache_line;
+    const mask: comptime_int = ~@as(usize, cache_line.len - 1);
 };
 
 test "cache line probe 2" {
@@ -1992,6 +2006,7 @@ test "cache line probe" {
     try tt.expectEqual(4, probe.next(entry_mask));
     try tt.expectEqual(20, probe.next(entry_mask));
     try tt.expectEqual(36, probe.next(entry_mask));
+
     // jump to 2nd cacheline
     try tt.expectEqual(180, probe.next(entry_mask));
     try tt.expectEqual(196, probe.next(entry_mask));

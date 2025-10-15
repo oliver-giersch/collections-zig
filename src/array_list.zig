@@ -17,6 +17,7 @@ pub fn ArrayListAligned(comptime T: type, comptime A: ?Alignment) type {
         /// An empty array list initializer.
         pub const empty: Self = .{ .bounded = .empty };
 
+        /// The type of item stored in the list.
         pub const Item = Bounded.Item;
         pub const item_alignment = Bounded.item_alignment;
 
@@ -27,6 +28,8 @@ pub fn ArrayListAligned(comptime T: type, comptime A: ?Alignment) type {
         /// The currently allocated (if non-zero capacity) bounded array list.
         bounded: Bounded,
 
+        /// Initializes an empty list with sufficient capacity for
+        /// `min_capacity` items.
         pub fn init(allocator: Allocator, min_capacity: usize) OOM!Self {
             const capacity = try capacityFor(min_capacity);
             if (capacity == 0)
@@ -64,18 +67,22 @@ pub fn ArrayListAligned(comptime T: type, comptime A: ?Alignment) type {
             return self.bounded.remainingCapacity();
         }
 
+        /// Returns a pointer to the last item.
         pub fn getLast(self: *Self) ?*Item {
             return self.bounded.getLast();
         }
 
+        /// Returns a const pointer to the last item.
         pub fn getConstLast(self: *const Self) ?*const Item {
             return self.bounded.getConstLast();
         }
 
+        /// Clears the list but keeps any allocated capacity.
         pub fn clear(self: *Self) void {
             self.bounded.clear();
         }
 
+        /// Reserves additional space for at least `capacity` additional items.
         pub fn reserve(self: *Self, allocator: Allocator, capacity: usize) OOM!void {
             if (capacity >= max_array_list_capacity)
                 return error.OutOfMemory;
