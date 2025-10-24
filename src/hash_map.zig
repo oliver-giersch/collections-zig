@@ -3,8 +3,32 @@
 //    involve keys/values, or (less relevant) options
 // b) use a setKV function for brevity!
 
-pub fn HashMap(comptime K: type, V: type, comptime O: Options) type {
-    return HashMapContext(K, V, std.hash_map.AutoContext(K), O);
+const std = @import("std");
+const builtin = @import("builtin");
+
+const debug = std.debug;
+const math = std.math;
+const mem = std.mem;
+const meta = std.meta;
+const testing = std.testing;
+
+const assert = debug.assert;
+const Alignment = mem.Alignment;
+const Allocator = mem.Allocator;
+const Wyhash = std.hash.Wyhash;
+
+const collections = @import("root.zig");
+
+const SafetyLock = collections.SafetyLock;
+const isPow2 = collections.isPow2;
+const nextPow2 = collections.nextPow2;
+
+comptime {
+    _ = @import("hash_map_tests.zig");
+}
+
+pub fn HashMap(comptime K: type, comptime V: type, comptime O: Options) type {
+    return HashMapContext(K, V, AutoContext(K), O);
 }
 
 pub fn StringHashMap(comptime V: type, comptime O: Options) type {
@@ -55,7 +79,7 @@ pub fn autoHashFn(comptime C: type, comptime T: type) (fn (C, T) Hash) {
             return if (std.meta.hasUniqueRepresentation(T))
                 Wyhash.hash(0, mem.asBytes(&key))
             else blk: {
-                var hasher = Wyhash.init(0);
+                var hasher = hash.Wyhash.init(0);
                 std.hash.autoHash(&hasher, key);
                 break :blk hasher.final();
             };
@@ -603,9 +627,9 @@ pub fn HashMapContext(
 
         test getByPtr {
             var map: AutoHashMap(i32, i32, .default) = .empty;
-            defer map.deinit(tt.allocator);
+            defer map.deinit(testing.allocator);
 
-            try map.reserve(tt.allocator, 4);
+            try map.reserve(testing.allocator, 4);
             map.pointer_stability.lock();
             defer map.pointer_stability.unlock();
 
@@ -618,7 +642,7 @@ pub fn HashMapContext(
             var it = map.keyIter();
             while (it.next()) |key| {
                 const value = map.getConstByPtr(key).*;
-                try tt.expectEqual(2 * key.*, value);
+                try testing.expectEqual(2 * key.*, value);
             }
         }
 
@@ -1022,17 +1046,7 @@ pub fn HashMapContext(
             // empty state and its capacity restored.
             const entry_idx = self.probeGetIdx(&probe, key, hint, ctx) orelse
                 return null;
-
-            const entry_idx_before = if (comptime options.probing_strategy == .cache_line)
-                probe.prev(self.entry_mask)
-            else
-                entry_idx -% Metadata.Block.len & self.entry_mask;
-            const empty_before: usize = @clz(self.getMetadataBlock(entry_idx_before).findAll(.empty));
-            const empty_after: usize = @ctz(self.getMetadataBlock(entry_idx).findAll(.empty));
-
-            // FIXME: still broken with cache-line probing
-            const end_of_sequence = (empty_before + empty_after) < Metadata.Block.len;
-            const metadata: Metadata = if (!end_of_sequence) .deleted else blk: {
+            const metadata: Metadata = if (!self.isLastInSequence(entry_idx)) .deleted else blk: {
                 self.remaining_capacity += 1;
                 break :blk .empty;
             };
@@ -1050,18 +1064,15 @@ pub fn HashMapContext(
         // FIXME: without this, removal works correctly ... where is the bug?
         fn isLastInSequence(
             self: *const Self,
-            probe: *Probe,
-            relative_idx: usize,
+            entry_idx: usize,
         ) bool {
-            // Check, if there is a subsequent empty slot after the entry
-            // index in same block relative to the last probing position.
-            // Otherwise, check if the next slot in the probing sequence
-            // is empty.
-            const next = if (relative_idx == Metadata.Block.len - 1)
-                probe.next(self.entry_mask)
+            const idx_before = if (comptime options.probing_strategy == .cache_line)
+                CacheLineProbe.start(entry_idx).prev(self.entry_mask)
             else
-                metadataIdx(probe, relative_idx + 1);
-            return self.metadata[next].isEmpty();
+                entry_idx -% Metadata.Block.len & self.entry_mask;
+            const empty_before: usize = @clz(self.getMetadataBlock(idx_before).findAll(.empty));
+            const empty_after: usize = @ctz(self.getMetadataBlock(entry_idx).findAll(.empty));
+            return (empty_before + empty_after) < Metadata.Block.len;
         }
 
         fn grow(
@@ -1882,6 +1893,67 @@ inline fn blockLen(cpu: std.Target.Cpu) usize {
     return @sizeOf(usize);
 }
 
+test "metadata" {
+    const empty: u8 = @bitCast(Metadata.empty);
+    const deleted: u8 = @bitCast(Metadata.deleted);
+
+    try testing.expectEqual(0b1111_1111, empty);
+    try testing.expectEqual(0b1000_0000, deleted);
+    try testing.expect(empty >= deleted);
+}
+
+test "metadata find" {
+    const hash1: Metadata = .{ .hash_hint = 0b1101101, .free = false };
+    const hash2: Metadata = .{ .hash_hint = 0b0011010, .free = false };
+
+    var block = Metadata.repeat(.empty);
+    block.vector[11] = @bitCast(hash1);
+    try testing.expectEqual(11, block.find(hash1));
+
+    block = Metadata.repeat(hash2);
+    block.vector[0] = @bitCast(Metadata.empty);
+    block.vector[4] = @bitCast(Metadata.empty);
+    block.vector[8] = @bitCast(Metadata.empty);
+    block.vector[12] = @bitCast(Metadata.deleted);
+
+    try testing.expectEqual(null, block.find(hash1));
+    block.vector[11] = @bitCast(hash1);
+    try testing.expectEqual(11, block.find(hash1));
+}
+
+test "metadata find free" {
+    const random_hash: Metadata = .{ .hash_hint = 0b1101101, .free = false };
+
+    var block = Metadata.repeat(random_hash);
+    try testing.expectEqual(null, block.findFree());
+
+    block = Metadata.repeat(random_hash);
+    block.vector[5] = @bitCast(Metadata.empty);
+    try testing.expectEqual(5, block.findFree());
+
+    block = Metadata.repeat(random_hash);
+    block.vector[9] = @bitCast(Metadata.deleted);
+    try testing.expectEqual(9, block.findFree());
+}
+
+test "metadata prepare rehash" {
+    const random_hash: Metadata = @bitCast(@as(u8, 0b0101_1001));
+    try testing.expectEqual(false, random_hash.free);
+    try testing.expectEqual(0b1011001, random_hash.hash_hint);
+
+    var block = Metadata.repeat(random_hash);
+    block = block.prepareRehash();
+    try testing.expectEqual(Metadata.repeat(.deleted), block);
+
+    block = Metadata.repeat(.empty);
+    block = block.prepareRehash();
+    try testing.expectEqual(Metadata.repeat(.empty), block);
+
+    block = Metadata.repeat(.deleted);
+    block = block.prepareRehash();
+    try testing.expectEqual(Metadata.repeat(.empty), block);
+}
+
 /// A linear probing sequence.
 const LinearProbe = struct {
     pos: usize,
@@ -1958,136 +2030,75 @@ const cache_line = struct {
     const mask: comptime_int = ~@as(usize, cache_line.len - 1);
 };
 
-test "cache line probe 2" {
-    if (cache_line.len != 128)
-        return error.SkipZigTest;
-
-    const entry_mask: usize = (1 << 9) - 1;
-    var probe = CacheLineProbe.start(262);
-    try tt.expectEqual(278, probe.next(entry_mask));
-    try tt.expectEqual(294, probe.next(entry_mask));
-    try tt.expectEqual(310, probe.next(entry_mask));
-    try tt.expectEqual(326, probe.next(entry_mask));
-    try tt.expectEqual(342, probe.next(entry_mask));
-    try tt.expectEqual(358, probe.next(entry_mask));
-    try tt.expectEqual(374, probe.next(entry_mask));
-    // jump to 4th cache line
-    try tt.expectEqual(390, probe.next(entry_mask));
-    try tt.expectEqual(406, probe.next(entry_mask));
-    try tt.expectEqual(422, probe.next(entry_mask));
-    try tt.expectEqual(438, probe.next(entry_mask));
-    try tt.expectEqual(454, probe.next(entry_mask));
-    try tt.expectEqual(470, probe.next(entry_mask));
-    try tt.expectEqual(486, probe.next(entry_mask));
-    try tt.expectEqual(502, probe.next(entry_mask));
-    // jump to 1st cache line
-    try tt.expectEqual(6, probe.next(entry_mask));
-    try tt.expectEqual(22, probe.next(entry_mask));
-    try tt.expectEqual(38, probe.next(entry_mask));
-    try tt.expectEqual(54, probe.next(entry_mask));
-    try tt.expectEqual(70, probe.next(entry_mask));
-    try tt.expectEqual(86, probe.next(entry_mask));
-    try tt.expectEqual(102, probe.next(entry_mask));
-    try tt.expectEqual(118, probe.next(entry_mask));
-    // jump to 2nd cache line
-    try tt.expectEqual(134, probe.next(entry_mask));
-}
-
 test "cache line probe" {
     if (cache_line.len != 128)
         return error.SkipZigTest;
 
     var entry_mask: usize = 256 - 1;
     var probe = CacheLineProbe.start(52);
-    try tt.expectEqual(68, probe.next(entry_mask));
-    try tt.expectEqual(84, probe.next(entry_mask));
-    try tt.expectEqual(100, probe.next(entry_mask));
-    try tt.expectEqual(116, probe.next(entry_mask));
-    try tt.expectEqual(4, probe.next(entry_mask));
-    try tt.expectEqual(20, probe.next(entry_mask));
-    try tt.expectEqual(36, probe.next(entry_mask));
+    try testing.expectEqual(68, probe.next(entry_mask));
+    try testing.expectEqual(84, probe.next(entry_mask));
+    try testing.expectEqual(100, probe.next(entry_mask));
+    try testing.expectEqual(116, probe.next(entry_mask));
+    try testing.expectEqual(4, probe.next(entry_mask));
+    try testing.expectEqual(20, probe.next(entry_mask));
+    try testing.expectEqual(36, probe.next(entry_mask));
 
     // jump to 2nd cacheline
-    try tt.expectEqual(180, probe.next(entry_mask));
-    try tt.expectEqual(196, probe.next(entry_mask));
-    try tt.expectEqual(212, probe.next(entry_mask));
-    try tt.expectEqual(228, probe.next(entry_mask));
-    try tt.expectEqual(244, probe.next(entry_mask));
-    try tt.expectEqual(132, probe.next(entry_mask));
-    try tt.expectEqual(148, probe.next(entry_mask));
-    try tt.expectEqual(164, probe.next(entry_mask));
+    try testing.expectEqual(180, probe.next(entry_mask));
+    try testing.expectEqual(196, probe.next(entry_mask));
+    try testing.expectEqual(212, probe.next(entry_mask));
+    try testing.expectEqual(228, probe.next(entry_mask));
+    try testing.expectEqual(244, probe.next(entry_mask));
+    try testing.expectEqual(132, probe.next(entry_mask));
+    try testing.expectEqual(148, probe.next(entry_mask));
+    try testing.expectEqual(164, probe.next(entry_mask));
     // jump back to 1st cache line
-    try tt.expectEqual(52, probe.next(entry_mask));
-    try tt.expectEqual(68, probe.next(entry_mask));
+    try testing.expectEqual(52, probe.next(entry_mask));
+    try testing.expectEqual(68, probe.next(entry_mask));
     // ... and so on
 
     entry_mask = 32 - 1;
     probe = CacheLineProbe.start(28);
-    try tt.expectEqual(12, probe.next(entry_mask));
-    try tt.expectEqual(28, probe.next(entry_mask));
-    try tt.expectEqual(12, probe.next(entry_mask));
-    try tt.expectEqual(28, probe.next(entry_mask));
+    try testing.expectEqual(12, probe.next(entry_mask));
+    try testing.expectEqual(28, probe.next(entry_mask));
+    try testing.expectEqual(12, probe.next(entry_mask));
+    try testing.expectEqual(28, probe.next(entry_mask));
 }
 
-test "metadata" {
-    const empty: u8 = @bitCast(Metadata.empty);
-    const deleted: u8 = @bitCast(Metadata.deleted);
+test "cache line probe 2" {
+    if (cache_line.len != 128)
+        return error.SkipZigTest;
 
-    try tt.expectEqual(0b1111_1111, empty);
-    try tt.expectEqual(0b1000_0000, deleted);
-    try tt.expect(empty >= deleted);
-}
-
-test "metadata find" {
-    const hash1: Metadata = .{ .hash_hint = 0b1101101, .free = false };
-    const hash2: Metadata = .{ .hash_hint = 0b0011010, .free = false };
-
-    var block = Metadata.repeat(.empty);
-    block.vector[11] = @bitCast(hash1);
-    try tt.expectEqual(11, block.find(hash1));
-
-    block = Metadata.repeat(hash2);
-    block.vector[0] = @bitCast(Metadata.empty);
-    block.vector[4] = @bitCast(Metadata.empty);
-    block.vector[8] = @bitCast(Metadata.empty);
-    block.vector[12] = @bitCast(Metadata.deleted);
-
-    try tt.expectEqual(null, block.find(hash1));
-    block.vector[11] = @bitCast(hash1);
-    try tt.expectEqual(11, block.find(hash1));
-}
-
-test "metadata find free" {
-    const random_hash: Metadata = .{ .hash_hint = 0b1101101, .free = false };
-
-    var block = Metadata.repeat(random_hash);
-    try tt.expectEqual(null, block.findFree());
-
-    block = Metadata.repeat(random_hash);
-    block.vector[5] = @bitCast(Metadata.empty);
-    try tt.expectEqual(5, block.findFree());
-
-    block = Metadata.repeat(random_hash);
-    block.vector[9] = @bitCast(Metadata.deleted);
-    try tt.expectEqual(9, block.findFree());
-}
-
-test "metadata prepare rehash" {
-    const random_hash: Metadata = @bitCast(@as(u8, 0b0101_1001));
-    try tt.expectEqual(false, random_hash.free);
-    try tt.expectEqual(0b1011001, random_hash.hash_hint);
-
-    var block = Metadata.repeat(random_hash);
-    block = block.prepareRehash();
-    try tt.expectEqual(Metadata.repeat(.deleted), block);
-
-    block = Metadata.repeat(.empty);
-    block = block.prepareRehash();
-    try tt.expectEqual(Metadata.repeat(.empty), block);
-
-    block = Metadata.repeat(.deleted);
-    block = block.prepareRehash();
-    try tt.expectEqual(Metadata.repeat(.empty), block);
+    const entry_mask: usize = (1 << 9) - 1;
+    var probe = CacheLineProbe.start(262);
+    try testing.expectEqual(278, probe.next(entry_mask));
+    try testing.expectEqual(294, probe.next(entry_mask));
+    try testing.expectEqual(310, probe.next(entry_mask));
+    try testing.expectEqual(326, probe.next(entry_mask));
+    try testing.expectEqual(342, probe.next(entry_mask));
+    try testing.expectEqual(358, probe.next(entry_mask));
+    try testing.expectEqual(374, probe.next(entry_mask));
+    // jump to 4th cache line
+    try testing.expectEqual(390, probe.next(entry_mask));
+    try testing.expectEqual(406, probe.next(entry_mask));
+    try testing.expectEqual(422, probe.next(entry_mask));
+    try testing.expectEqual(438, probe.next(entry_mask));
+    try testing.expectEqual(454, probe.next(entry_mask));
+    try testing.expectEqual(470, probe.next(entry_mask));
+    try testing.expectEqual(486, probe.next(entry_mask));
+    try testing.expectEqual(502, probe.next(entry_mask));
+    // jump to 1st cache line
+    try testing.expectEqual(6, probe.next(entry_mask));
+    try testing.expectEqual(22, probe.next(entry_mask));
+    try testing.expectEqual(38, probe.next(entry_mask));
+    try testing.expectEqual(54, probe.next(entry_mask));
+    try testing.expectEqual(70, probe.next(entry_mask));
+    try testing.expectEqual(86, probe.next(entry_mask));
+    try testing.expectEqual(102, probe.next(entry_mask));
+    try testing.expectEqual(118, probe.next(entry_mask));
+    // jump to 2nd cache line
+    try testing.expectEqual(134, probe.next(entry_mask));
 }
 
 fn nextBit(mask: *Metadata.BitMask) ?usize {
@@ -2103,12 +2114,12 @@ fn nextBit(mask: *Metadata.BitMask) ?usize {
 
 test "nextBit" {
     var mask: u16 = 0b1001_0111;
-    try tt.expectEqual(0, nextBit(&mask));
-    try tt.expectEqual(1, nextBit(&mask));
-    try tt.expectEqual(2, nextBit(&mask));
-    try tt.expectEqual(4, nextBit(&mask));
-    try tt.expectEqual(7, nextBit(&mask));
-    try tt.expectEqual(null, nextBit(&mask));
+    try testing.expectEqual(0, nextBit(&mask));
+    try testing.expectEqual(1, nextBit(&mask));
+    try testing.expectEqual(2, nextBit(&mask));
+    try testing.expectEqual(4, nextBit(&mask));
+    try testing.expectEqual(7, nextBit(&mask));
+    try testing.expectEqual(null, nextBit(&mask));
 }
 
 fn overflowingAdd(a: usize, b: usize) Allocator.Error!usize {
@@ -2130,533 +2141,130 @@ fn nths(percent: u8) usize {
     return if (percent == 100) 100 else 100 / (100 - percent);
 }
 
-comptime {
-    _ = @import("hash_map_tests.zig");
-}
-
-const std = @import("std");
-const builtin = @import("builtin");
-
-const debug = std.debug;
-const math = std.math;
-const mem = std.mem;
-const tt = std.testing;
-
-const assert = debug.assert;
-
-const Alignment = std.mem.Alignment;
-const Allocator = std.mem.Allocator;
-const Wyhash = std.hash.Wyhash;
-
-const collections = @import("root.zig");
-
-const SafetyLock = collections.SafetyLock;
-const isPow2 = collections.isPow2;
-const nextPow2 = collections.nextPow2;
-
-const Map = HashMapContext(i32, i32, OneToOne, .default);
-const OneToOne = struct {
-    pub fn hash(_: OneToOne, key: i32) u64 {
-        const unsigned: u64 = @bitCast(-@as(i64, key));
-        return unsigned;
-    }
-
-    pub fn eql(_: OneToOne, a: i32, b: i32) bool {
-        return a == b;
-    }
-};
-
 test "nths" {
-    try tt.expectEqual(100, nths(100));
-    try tt.expectEqual(100, nths(99));
-    try tt.expectEqual(50, nths(98));
-    try tt.expectEqual(33, nths(97));
-    try tt.expectEqual(25, nths(96));
-    try tt.expectEqual(20, nths(95));
-    try tt.expectEqual(12, nths(92));
-    try tt.expectEqual(11, nths(91));
-    try tt.expectEqual(10, nths(90));
-    try tt.expectEqual(9, nths(89));
-    try tt.expectEqual(8, nths(88));
-    try tt.expectEqual(7, nths(87));
-    try tt.expectEqual(7, nths(86));
-    try tt.expectEqual(6, nths(85));
-    try tt.expectEqual(6, nths(84));
-    try tt.expectEqual(5, nths(83));
-    try tt.expectEqual(5, nths(80));
-    try tt.expectEqual(5, nths(80));
-    try tt.expectEqual(4, nths(79));
-    try tt.expectEqual(4, nths(75));
-    try tt.expectEqual(3, nths(74));
-    try tt.expectEqual(3, nths(67));
-    try tt.expectEqual(2, nths(66));
-    try tt.expectEqual(2, nths(50));
+    try testing.expectEqual(100, nths(100));
+    try testing.expectEqual(100, nths(99));
+    try testing.expectEqual(50, nths(98));
+    try testing.expectEqual(33, nths(97));
+    try testing.expectEqual(25, nths(96));
+    try testing.expectEqual(20, nths(95));
+    try testing.expectEqual(12, nths(92));
+    try testing.expectEqual(11, nths(91));
+    try testing.expectEqual(10, nths(90));
+    try testing.expectEqual(9, nths(89));
+    try testing.expectEqual(8, nths(88));
+    try testing.expectEqual(7, nths(87));
+    try testing.expectEqual(7, nths(86));
+    try testing.expectEqual(6, nths(85));
+    try testing.expectEqual(6, nths(84));
+    try testing.expectEqual(5, nths(83));
+    try testing.expectEqual(5, nths(80));
+    try testing.expectEqual(5, nths(80));
+    try testing.expectEqual(4, nths(79));
+    try testing.expectEqual(4, nths(75));
+    try testing.expectEqual(3, nths(74));
+    try testing.expectEqual(3, nths(67));
+    try testing.expectEqual(2, nths(66));
+    try testing.expectEqual(2, nths(50));
 }
 
 test "entries for capacity" {
-    // default max load is 87.5%
-    try tt.expectEqual(8, Map.load_factor_nths);
-    try tt.expectEqual(16, Map.entriesForCapacity(1));
-    try tt.expectEqual(16, Map.entriesForCapacity(2));
-    try tt.expectEqual(16, Map.entriesForCapacity(12));
-    try tt.expectEqual(16, Map.entriesForCapacity(13));
-    try tt.expectEqual(16, Map.entriesForCapacity(14));
-    try tt.expectEqual(32, Map.entriesForCapacity(15));
-    try tt.expectEqual(32, Map.entriesForCapacity(16));
-    try tt.expectEqual(64, Map.entriesForCapacity(51));
-    try tt.expectEqual(64, Map.entriesForCapacity(52));
+    // default max load is 88 (87.5)%
+    const MapLoad88 = HashMap(u32, u32, .{ .max_load_percentage = 88 });
+    try testing.expectEqual(8, MapLoad88.load_factor_nths);
+    try testing.expectEqual(16, MapLoad88.entriesForCapacity(1));
+    try testing.expectEqual(16, MapLoad88.entriesForCapacity(14));
+    try testing.expectEqual(32, MapLoad88.entriesForCapacity(15));
+    try testing.expectEqual(32, MapLoad88.entriesForCapacity(16));
+    try testing.expectEqual(64, MapLoad88.entriesForCapacity(51));
+    try testing.expectEqual(128, MapLoad88.entriesForCapacity(112));
+    try testing.expectEqual(256, MapLoad88.entriesForCapacity(113));
+    try testing.expectEqual(112, MapLoad88.applyLoadLimit(128 - 1));
 
-    const MapLoad88 = HashMapContext(i32, i32, struct {}, .{ .max_load_percentage = 88 });
-    try tt.expectEqual(8, MapLoad88.load_factor_nths);
-    try tt.expectEqual(128, MapLoad88.entriesForCapacity(112));
-    try tt.expectEqual(256, MapLoad88.entriesForCapacity(113));
-    try tt.expectEqual(112, MapLoad88.applyLoadLimit(128 - 1));
-
-    // max load 100% must still reserve at least one additional entry
-    const MapLoad100 = HashMapContext(i32, i32, struct {}, .{ .max_load_percentage = 100 });
-    try tt.expectEqual(100, MapLoad100.load_factor_nths);
-    try tt.expectEqual(16, MapLoad100.entriesForCapacity(1));
-    try tt.expectEqual(16, MapLoad100.entriesForCapacity(15));
-    try tt.expectEqual(32, MapLoad100.entriesForCapacity(31));
-    try tt.expectEqual(256, MapLoad100.entriesForCapacity(255));
-    try tt.expectEqual(127, MapLoad100.applyLoadLimit(128 - 1));
-}
-
-test "empty map" {
-    var map: Map = .empty;
-    defer map.deinit(tt.allocator);
-    try tt.expectEqual(0, map.len);
-    try tt.expectEqual(0, map.remaining_capacity);
-    try tt.expectEqual(0, map.entry_mask);
-
-    try tt.expect(map.getPtrContext(0, .{}) == null);
-    try tt.expect(map.get(1) == null);
-}
-
-test "empty map get" {
-    var map: Map = .empty;
-    const value = map.get(1);
-    try tt.expectEqual(0, map.getEntry(OneToOne.hash(.{}, 1)));
-    try tt.expectEqual(null, value);
-}
-
-test "insert and contains" {
-    const allocator = tt.allocator;
-
-    var map: HashMap(u32, void, .default) = .empty;
-    defer map.deinit(allocator);
-
-    try map.insert(allocator, 1, {});
-    try tt.expectEqual(1, map.len);
-    try tt.expectEqual(true, map.contains(1));
-    try tt.expectEqual(false, map.contains(2));
-}
-
-test "insert and get" {
-    const allocator = testing.allocator;
-
-    var map: HashMap(u32, u32, .default) = .empty;
-    defer map.deinit(allocator);
-
-    try map.insert(allocator, 1, 2);
-    try map.insert(allocator, 2, 4);
-    try tt.expectEqual(2, map.len);
-    try tt.expectEqual(2, map.get(1));
-    try tt.expectEqual(4, map.get(2));
+    // max load 100% must still reserve at least one additional entry!
+    const MapLoad100 = HashMap(u32, u32, .{ .max_load_percentage = 100 });
+    try testing.expectEqual(100, MapLoad100.load_factor_nths);
+    try testing.expectEqual(16, MapLoad100.entriesForCapacity(1));
+    try testing.expectEqual(16, MapLoad100.entriesForCapacity(15));
+    try testing.expectEqual(32, MapLoad100.entriesForCapacity(31));
+    try testing.expectEqual(256, MapLoad100.entriesForCapacity(255));
+    try testing.expectEqual(127, MapLoad100.applyLoadLimit(128 - 1));
 }
 
 test "reserve" {
-    var map: Map = .empty;
-    defer map.deinit(tt.allocator);
+    var map: HashMap(u32, u32, .default) = .empty;
+    defer map.deinit(testing.allocator);
 
-    try map.reserve(tt.allocator, 1);
-    try tt.expect(map.notAllocated() == false);
-    try tt.expectEqual(0, map.len);
-    try tt.expectEqual(14, map.remaining_capacity);
+    try map.reserve(testing.allocator, 1);
+    try testing.expect(map.notAllocated() == false);
+    try testing.expectEqual(0, map.len);
+    try testing.expectEqual(14, map.remaining_capacity);
 }
 
-test "tiny map" {
-    try tt.expectEqual(0xffffffffffffffff, (OneToOne{}).hash(1));
-    try tt.expectEqual(Metadata.hashHint(0xffffffffffffffff), Metadata{ .hash_hint = 0x7f, .free = false });
+test "insert (cache-line probing)" {
+    const allocator = testing.allocator;
 
-    var map: Map = .empty;
-    defer map.deinit(tt.allocator);
-
-    // This should grow the capacity from 0 to 14 (with 16 entries and 87.5% max load)
-    try map.insert(tt.allocator, 0, 99);
-    try tt.expectEqual(1, map.len);
-    try tt.expectEqual(13, map.remaining_capacity);
-    try map.insert(tt.allocator, 1, 100);
-    try tt.expectEqual(2, map.len);
-    try tt.expectEqual(12, map.remaining_capacity);
-
-    // Inspect the metatadata array internals.
-    const blocks = map.getMetadataBlocks();
-    try tt.expectEqual(2, blocks.len);
-    // Assert that the mirror block is indeed identical to first block.
-    try tt.expectEqual(blocks[0], blocks[1]);
-    // Assert that the appropriate metadata slots contain the appropriate values.
-    try tt.expectEqual(0, map.getEntry(OneToOne.hash(.{}, 0)));
-    try tt.expectEqual(Metadata{ .hash_hint = 0x00, .free = false }, map.metadata[0]);
-    try tt.expectEqual(0, map.getKey(0).*);
-    try tt.expectEqual(99, map.getValue(0).*);
-
-    try tt.expectEqual(15, map.getEntry(OneToOne.hash(.{}, 1)));
-    try tt.expectEqual(Metadata{ .hash_hint = 0x7f, .free = false }, map.metadata[15]);
-    try tt.expectEqual(1, map.getKey(15).*);
-    try tt.expectEqual(100, map.getValue(15).*);
-
-    // Test the key retrieval
-    try tt.expectEqual(99, map.get(0));
-    try tt.expectEqual(100, map.get(1));
-
-    // Test key removal
-    try tt.expectEqual(99, map.removeFetch(0));
-    try tt.expectEqual(100, map.removeFetch(1));
-
-    // Check for tombstones
-    try tt.expectEqual(14, map.remaining_capacity);
-    try tt.expectEqual(0, map.len);
-    try tt.expectEqual(Metadata.empty, map.metadata[0]);
-    try tt.expectEqual(Metadata.empty, map.metadata[15]);
-}
-
-test "insert cache line probing" {
-    const allocator = tt.allocator;
-
-    var map: HashMap(i32, void, .{ .probing_strategy = .cache_line }) = .empty;
+    var map: HashMap(u32, void, .{ .probing_strategy = .cache_line }) = .empty;
     defer map.deinit(allocator);
 
-    var i: i32 = 0;
+    var i: u32 = 0;
     while (i < 100) : (i += 1) {
         const is: usize = @intCast(i);
         const found = try map.insertFetch(allocator, i, {});
-        try tt.expectEqual(null, found);
+        try testing.expectEqual(null, found);
 
-        try tt.expectEqual(is + 1, map.len);
-        try tt.expectEqual(map.getUsableCapacity() - (is + 1), map.remaining_capacity);
+        try testing.expectEqual(is + 1, map.len);
+        try testing.expectEqual(map.getUsableCapacity() - (is + 1), map.remaining_capacity);
     }
 
-    try tt.expectEqual(112, map.getUsableCapacity());
-    try tt.expectEqual(100, map.len);
-    try tt.expectEqual(12, map.remaining_capacity);
+    try testing.expectEqual(112, map.getUsableCapacity());
+    try testing.expectEqual(100, map.len);
+    try testing.expectEqual(12, map.remaining_capacity);
 }
 
-test "rehash" {
-    const allocator = tt.allocator;
+test "remove (cache-line probing)" {
+    const allocator = testing.allocator;
 
-    var map: HashMap(i32, i32, .default) = .empty;
+    var map: HashMap(u32, u32, .{ .probing_strategy = .cache_line, .max_load_percentage = 100 }) = .empty;
     defer map.deinit(allocator);
 
-    // Populate a map with all integers from 0 to 100, then remove
-    // every third number.
-    var i: i32 = 0;
-    while (i < 100) : (i += 1) {
+    var i: u32 = 0;
+    while (i < 511) : (i += 1) {
         try map.insert(allocator, i, i);
     }
 
-    try tt.expectEqual(100, map.len);
-    try tt.expectEqual(12, map.remaining_capacity);
-
-    i = 0;
-    while (i < 100) : (i += 3) {
-        try tt.expectEqual(i, map.removeFetch(i));
-        try tt.expectEqual(null, map.get(i));
-
-        var j: i32 = 0;
-        while (j < 100) : (j += 1) {
-            if (@mod(j, 3) == 0 and j <= i)
-                try tt.expectEqual(null, map.get(j))
-            else
-                try tt.expectEqual(j, map.get(j));
-        }
-    }
-
-    try tt.expectEqual(66, map.len);
-    try tt.expectEqual(16, map.remaining_capacity);
-
-    i = 0;
-    while (i < 100) : (i += 1) {
-        if (@mod(i, 3) == 0)
-            try tt.expectEqual(null, map.get(i))
-        else
-            try tt.expectEqual(i, map.get(i));
-    }
-
-    map.rehash();
-
-    try tt.expectEqual(66, map.len);
-    try tt.expectEqual(46, map.remaining_capacity);
-
-    i = 0;
-    while (i < 100) : (i += 1) {
-        if (@mod(i, 3) == 0)
-            try tt.expectEqual(null, map.get(i))
-        else
-            try tt.expectEqual(i, map.get(i));
-    }
-}
-
-test "repeat remove" {
-    var map: HashMap(u64, void, .default) = .empty;
-    defer map.deinit(tt.allocator);
-
-    try map.reserve(tt.allocator, 4);
-    map.insertUnchecked(0, {});
-    map.insertUnchecked(1, {});
-    map.insertUnchecked(2, {});
-    map.insertUnchecked(3, {});
-
-    var i: usize = 0;
-    while (i < 10) : (i += 1) {
-        try tt.expect(map.remove(3));
-        map.insertUnchecked(3, {});
-    }
-
-    try tt.expect(map.get(0) != null);
-    try tt.expect(map.get(1) != null);
-    try tt.expect(map.get(2) != null);
-    try tt.expect(map.get(3) != null);
+    try testing.expectEqual(511, map.len);
+    try testing.expectEqual(0, map.remaining_capacity);
 }
 
 test "get or insert u32" {
-    const allocator = tt.allocator;
+    const allocator = testing.allocator;
 
     var map: HashMap(u32, u32, .default) = .empty;
-    defer map.deinit(tt.allocator);
+    defer map.deinit(testing.allocator);
 
     // First round of inserts, before first resizing.
     var i: u32 = 0;
     while (i < 14) : (i += 1) {
         const value = try map.getOrInsert(allocator, i, i);
-        try tt.expectEqual(null, value);
+        try testing.expectEqual(null, value);
     }
 
     i = 0;
     while (i < 14) : (i += 1) {
         const value = map.get(i) orelse return error.NotFound;
-        try tt.expectEqual(i, value);
+        try testing.expectEqual(i, value);
     }
 
     // Second round of inserts.
     while (i < 100) : (i += 1) {
         const value = try map.getOrInsert(allocator, i, i);
-        try tt.expectEqual(null, value);
+        try testing.expectEqual(null, value);
     }
 
     i = 0;
     while (i < 100) : (i += 1) {
         const value = map.get(i) orelse return error.NotFound;
-        try tt.expectEqual(i, value);
-    }
-}
-
-test "get or insert sum" {
-    var map: HashMap(u32, u32, .default) = .empty;
-    defer map.deinit(tt.allocator);
-
-    var i: u32 = 0;
-    while (i < 10) : (i += 1) {
-        _ = try map.insert(tt.allocator, i * 2, 2);
-    }
-
-    i = 0;
-    while (i < 20) : (i += 1) {
-        _ = try map.getOrInsert(tt.allocator, i, 1);
-    }
-
-    i = 0;
-    var sum = i;
-    while (i < 20) : (i += 1) {
-        sum += map.get(i) orelse unreachable;
-    }
-
-    try tt.expectEqual(30, sum);
-}
-
-test "get or insert allocation failure" {
-    var map: StringHashMap(void, .default) = .empty;
-    try tt.expectError(error.OutOfMemory, map.getOrInsertKey(tt.failing_allocator, "hello"));
-}
-
-test "const iterator" {
-    const BoundedArrayList = @import("array_list.zig").BoundedArrayList(u32);
-
-    var map: HashMap(u32, u32, .default) = .empty;
-    defer map.deinit(tt.allocator);
-
-    var i: u32 = 0;
-    while (i < 100) : (i += 1) {
-        const prev = try map.insertFetch(tt.allocator, i, i * 2);
-        try tt.expectEqual(null, prev);
-    }
-
-    var keys: [100]u32 = undefined;
-    var key_list: BoundedArrayList = .init(&keys);
-    var values: [100]u32 = undefined;
-    var value_list: BoundedArrayList = .init(&values);
-
-    var it = map.constIter();
-    while (it.next()) |entry| {
-        try tt.expectEqual(2 * entry.key.*, entry.value.*);
-        try key_list.push(entry.key.*);
-        try value_list.push(entry.value.*);
-    }
-
-    mem.sort(u32, key_list.items, {}, std.sort.asc(u32));
-    mem.sort(u32, value_list.items, {}, std.sort.asc(u32));
-
-    i = 0;
-    while (i < 100) : (i += 1) {
-        try tt.expectEqual(i, key_list.items[i]);
-        try tt.expectEqual(i * 2, value_list.items[i]);
-    }
-}
-
-test "key iterator" {
-    const BoundedArrayList = @import("array_list.zig").BoundedArrayList(u32);
-
-    var map: HashMap(u32, void, .default) = .empty;
-    defer map.deinit(tt.allocator);
-
-    var i: u32 = 0;
-    while (i < 100) : (i += 1) {
-        try map.insert(tt.allocator, i, {});
-    }
-
-    var keys: [100]u32 = undefined;
-    var key_list: BoundedArrayList = .init(&keys);
-
-    var it = map.keyIter();
-    while (it.next()) |key| {
-        try key_list.push(key.*);
-    }
-
-    mem.sort(u32, key_list.items, {}, std.sort.asc(u32));
-
-    i = 0;
-    while (i < 100) : (i += 1) {
-        try tt.expectEqual(i, key_list.items[i]);
-    }
-}
-
-test "value iterator" {
-    const BoundedArrayList = @import("array_list.zig").BoundedArrayList(u32);
-
-    var map: HashMap(u32, u32, .default) = .empty;
-    defer map.deinit(tt.allocator);
-
-    var i: u32 = 0;
-    while (i < 100) : (i += 1) {
-        const prev = try map.insertFetch(tt.allocator, i, i * 2);
-        try tt.expectEqual(null, prev);
-    }
-
-    var values: [100]u32 = undefined;
-    var value_list: BoundedArrayList = .init(&values);
-
-    {
-        var value_it = map.valueIter();
-        while (value_it.next()) |value| {
-            value.* *= 2;
-        }
-    }
-
-    var it = map.constValueIter();
-    while (it.next()) |value| {
-        try value_list.push(value.*);
-    }
-
-    mem.sort(u32, value_list.items, {}, std.sort.asc(u32));
-
-    i = 0;
-    while (i < 100) : (i += 1) {
-        try tt.expectEqual(i * 4, value_list.items[i]);
-    }
-}
-
-const testing = std.testing;
-
-fn testInsertN(n: usize, pre_alloc: bool) !void {
-    var map: HashMap(u32, u32, .default) = if (pre_alloc)
-        try .init(testing.allocator, n)
-    else
-        .empty;
-    defer map.deinit(testing.allocator);
-
-    var i: u32 = 0;
-    while (i < n) : (i += 1) {
-        const prev = map.insertFetch(testing.allocator, i, i);
-        try testing.expectEqual(null, prev);
-    }
-
-    i = 0;
-    while (i < n) : (i += 1) {
-        const value = map.get(i);
         try testing.expectEqual(i, value);
-    }
-
-    try testing.expectEqual(n, map.len);
-}
-
-test "insert 1e2 elements" {
-    try testInsertN(100, true);
-    try testInsertN(100, false);
-}
-
-test "insert 1e3 elements" {
-    try testInsertN(1_000, true);
-    try testInsertN(1_000, false);
-}
-
-test "insert 1e6 elements" {
-    try testInsertN(1_000_000, true);
-    try testInsertN(1_000_000, false);
-}
-
-test "remove 1e6 elements randomly" {
-    // FIXME: find out why test fails?
-    if (true) return error.SkipZigTest;
-
-    const ArrayList = @import("array_list.zig").ArrayList;
-    const n = 1_000_000;
-
-    //var map: HashMap(u32, u32, .default) = .empty;
-    var map: HashMap(u32, u32, .default) = try .init(testing.allocator, n);
-    defer map.deinit(testing.allocator);
-
-    var keys: ArrayList(u32) = .empty;
-    defer keys.deinit(testing.allocator);
-
-    var i: u32 = 0;
-    while (i < n) : (i += 1) {
-        try keys.push(testing.allocator, i);
-    }
-
-    var prng = std.Random.DefaultPrng.init(std.testing.random_seed);
-    const random = prng.random();
-    random.shuffle(u32, keys.bounded.items);
-
-    for (keys.bounded.items) |key| {
-        try map.insert(testing.allocator, key, key);
-        //map.insertUnchecked(key, key);
-    }
-
-    i = 0;
-    while (i < n) : (i += 1) {
-        const value = map.get(i);
-        try tt.expectEqual(i, value);
-    }
-
-    random.shuffle(u32, keys.bounded.items);
-    i = 0;
-
-    while (i < n) : (i += 1) {
-        const key = keys.bounded.items[i];
-        const prev = map.removeFetch(key);
-        if (prev == null) {
-            unreachable;
-        }
-        try testing.expectEqual(key, prev);
     }
 }

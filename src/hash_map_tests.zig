@@ -1,3 +1,8 @@
+const std = @import("std");
+const mem = std.mem;
+const sort = std.sort;
+const testing = std.testing;
+
 const hash_map = @import("hash_map.zig");
 
 const ArrayList = @import("array_list.zig").ArrayList;
@@ -31,6 +36,43 @@ inline fn getConfigurations() []const Options {
 }
 
 const cfgs = getConfigurations();
+
+fn testEmptyMap(comptime options: Options) !void {
+    var map: HashMap(u32, u32, options) = .empty;
+    defer map.deinit(testing.allocator);
+
+    try testing.expectEqual(0, map.len);
+    try testing.expectEqual(0, map.remaining_capacity);
+    try testing.expectEqual(0, map.entry_mask);
+
+    try testing.expect(map.getPtr(0) == null);
+    try testing.expect(map.get(1) == null);
+}
+
+fn testInsertContains(comptime options: Options) !void {
+    const allocator = testing.allocator;
+
+    var map: HashMap(u32, void, options) = .empty;
+    defer map.deinit(allocator);
+
+    try map.insert(allocator, 1, {});
+    try testing.expectEqual(1, map.len);
+    try testing.expectEqual(true, map.contains(1));
+    try testing.expectEqual(false, map.contains(2));
+}
+
+fn testInsertGet(comptime options: Options) !void {
+    const allocator = testing.allocator;
+
+    var map: HashMap(u32, u32, options) = .empty;
+    defer map.deinit(allocator);
+
+    try map.insert(allocator, 1, 2);
+    try map.insert(allocator, 2, 4);
+    try testing.expectEqual(2, map.len);
+    try testing.expectEqual(2, map.get(1));
+    try testing.expectEqual(4, map.get(2));
+}
 
 fn testAllocationFailure(comptime options: Options) !void {
     var map: HashMap(u32, u32, options) = .empty;
@@ -93,6 +135,7 @@ fn testRehashN(comptime options: Options, n: usize) !void {
     var map: HashMap(u32, u32, options) = .empty;
     defer map.deinit(testing.allocator);
 
+    // Populate with all numbers 0-N
     var i: u32 = 0;
     while (i < n) : (i += 1) {
         try map.insert(testing.allocator, i, i);
@@ -100,6 +143,7 @@ fn testRehashN(comptime options: Options, n: usize) !void {
 
     try testing.expectEqual(n, map.len);
 
+    // Remove every third value
     i = 0;
     while (i < n) : (i += 3) {
         try testing.expectEqual(i, map.removeFetch(i));
@@ -257,6 +301,24 @@ fn testRandomInsertRemoveN(
     }
 }
 
+test "empty map" {
+    inline for (cfgs) |options| {
+        try testEmptyMap(options);
+    }
+}
+
+test "insert and contains" {
+    inline for (cfgs) |options| {
+        try testInsertContains(options);
+    }
+}
+
+test "insert and get" {
+    inline for (cfgs) |options| {
+        try testInsertGet(options);
+    }
+}
+
 test "allocation failure" {
     inline for (cfgs) |options| {
         try testAllocationFailure(options);
@@ -332,8 +394,3 @@ test "debug test" {
     const options: Options = .{ .layout = .array, .probing_strategy = .cache_line, .max_load_percentage = 100 };
     try testRandomInsertRemoveN(options, 1_000_000, true);
 }
-
-const std = @import("std");
-const mem = std.mem;
-const sort = std.sort;
-const testing = std.testing;
