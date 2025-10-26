@@ -1,6 +1,7 @@
 const min_array_list_capacity = 8;
 const max_array_list_capacity = 1 << (@bitSizeOf(usize) - 1);
 
+/// A growable list of contiguous items in memory.
 pub fn ArrayList(comptime T: type) type {
     return ArrayListAligned(T, null);
 }
@@ -23,7 +24,7 @@ pub fn ArrayListAligned(comptime T: type, comptime A: ?Alignment) type {
 
         pub const OOM = collections.OOM;
 
-        const Bounded = BoundedArrayListAligned(T, A);
+        pub const Bounded = BoundedArrayListAligned(T, A);
 
         /// The currently allocated (if non-zero capacity) bounded array list.
         bounded: Bounded,
@@ -307,6 +308,7 @@ test "append slice at as array" {
     try tt.expectEqualSlices(i32, &.{ 1, 2, 3, 4, 5, 6, 7, 8 }, list.bounded.items);
 }
 
+/// A bounded list of contiguous items in memory.
 pub fn BoundedArrayList(comptime T: type) type {
     return BoundedArrayListAligned(T, null);
 }
@@ -326,15 +328,21 @@ pub fn BoundedArrayListAligned(
         /// An empty array list initializer.
         pub const empty: Self = .{ .items = &.{} };
 
+        /// The type of items stored in the list.
         pub const Item = T;
+        /// The alignment of the item slice.
         pub const item_alignment = if (A) |alignment|
             alignment.toByteUnits()
         else
             @alignOf(Item);
 
+        /// The out-of-memory error.
         pub const OOM = collections.OOM;
 
         /// The slice of initialized items.
+        ///
+        /// It always represents the lists's valid part and can therefore be
+        /// accessed directly for iteration, indexing, etc.
         items: []align(item_alignment) Item,
         /// The maximum capacity of the backing memory.
         capacity: usize = 0,
@@ -486,7 +494,7 @@ pub fn BoundedArrayListAligned(
             @memcpy(slice, items);
         }
 
-        /// Removes and returns the last item in the list or returns null, if
+        /// Removes and returns the list's tail item or returns null, if
         /// the list is empty.
         pub fn pop(self: *Self) ?Item {
             if (self.items.len == 0)
@@ -500,6 +508,11 @@ pub fn BoundedArrayListAligned(
             return item;
         }
 
+        /// Removes and returns the item at the given index.
+        ///
+        /// Any following items are backshifted to fill the hole.
+        ///
+        /// Asserts that the index is within bounds.
         pub fn remove(self: *Self, idx: usize) Item {
             assert(idx < self.items.len);
             const item = self.items[idx];
@@ -507,6 +520,15 @@ pub fn BoundedArrayListAligned(
             return item;
         }
 
+        /// Removes and returns the item at the given index.
+        ///
+        /// Instead of shifting all initialized items after the given index
+        /// backwards, only the item and the end of the item slice is moved in
+        /// to fill the hole.
+        /// This is generally more efficient, but destroys any established order
+        /// of items within the item slice.
+        ///
+        /// Asserts that the index is within bounds.
         pub fn swapRemove(self: *Self, idx: usize) Item {
             const last_item = self.pop() orelse unreachable;
             const removed_item = self.items[idx];

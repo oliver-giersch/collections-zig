@@ -1,5 +1,8 @@
 const single = @This();
 
+const std = @import("std");
+const assert = std.debug.assert;
+
 /// An intrusive, single-linked list.
 ///
 /// This type of list is the most space efficient and is well suited for head
@@ -27,7 +30,7 @@ pub const List = struct {
     /// A forward iterator over all links in the list.
     pub const Iterator = GenericIterator(false);
 
-    /// The head of the list.
+    /// The list's head link.
     head: ?*Self.Link,
 
     /// Returns true if the list is empty.
@@ -37,11 +40,26 @@ pub const List = struct {
         return Mixin(Self).isEmpty(self);
     }
 
+    test isEmpty {
+        var list: List = .empty;
+        try testing.expect(list.isEmpty());
+    }
+
     /// Returns true if the list contains the given link.
     ///
     /// This operation has O(n) complexity in the worst case.
     pub fn contains(self: *const Self, link: *const Self.Link) bool {
         return Mixin(Self).contains(self, link);
+    }
+
+    test contains {
+        var list: List = .empty;
+        var links: [2]List.Link = undefined;
+
+        list.insertHead(&links[1]);
+        list.insertHead(&links[0]);
+        try testing.expect(list.contains(&links[0]));
+        try testing.expect(list.contains(&links[1]));
     }
 
     /// Returns the list's length.
@@ -52,6 +70,15 @@ pub const List = struct {
     /// This operation has O(n) complexity.
     pub fn len(self: *const Self) usize {
         return Mixin(Self).len(self);
+    }
+
+    test len {
+        var list: List = .empty;
+        var links: [2]List.Link = undefined;
+
+        list.insertHead(&links[1]);
+        list.insertHead(&links[0]);
+        try testing.expectEqual(2, list.len());
     }
 
     /// Returns the link at the given index.
@@ -84,12 +111,12 @@ pub const List = struct {
         var i: usize = 0;
 
         while (it.next()) |link| {
-            try tt.expectEqual(&links[i], link);
+            try testing.expectEqual(&links[i], link);
             i += 1;
         }
     }
 
-    /// Returns a constant iterator over the items in the list.
+    /// Returns a const iterator over the items in the list.
     pub fn constIter(self: *const Self) ConstIterator {
         return Mixin(Self).constIter(self);
     }
@@ -105,7 +132,7 @@ pub const List = struct {
         var i: usize = 0;
 
         while (it.next()) |link| {
-            try tt.expectEqual(&links[i], link);
+            try testing.expectEqual(&links[i], link);
             i += 1;
         }
     }
@@ -130,8 +157,8 @@ pub const List = struct {
         list.insertHead(&links[1]);
         list.insertHead(&links[0]);
 
-        try tt.expectEqual(&links[0], list.getConst(0));
-        try tt.expectEqual(&links[1], list.getConst(1));
+        try testing.expectEqual(&links[0], list.getConst(0));
+        try testing.expectEqual(&links[1], list.getConst(1));
     }
 
     /// Inserts the given link after the given predecessor link.
@@ -155,8 +182,8 @@ pub const List = struct {
         list.insertHead(&links[0]);
         list.insertAfter(&links[0], &links[1]);
 
-        try tt.expectEqual(&links[0], list.getConst(0));
-        try tt.expectEqual(&links[1], list.getConst(1));
+        try testing.expectEqual(&links[0], list.getConst(0));
+        try testing.expectEqual(&links[1], list.getConst(1));
     }
 
     /// Removes the head link from the list.
@@ -177,9 +204,9 @@ pub const List = struct {
         list.insertHead(&links[1]);
         list.insertHead(&links[0]);
 
-        try tt.expectEqual(&links[0], list.removeHead());
-        try tt.expectEqual(&links[1], list.removeHead());
-        try tt.expectEqual(null, list.removeHead());
+        try testing.expectEqual(&links[0], list.removeHead());
+        try testing.expectEqual(&links[1], list.removeHead());
+        try testing.expectEqual(null, list.removeHead());
     }
 
     /// Removes and returns the link after the given link.
@@ -202,7 +229,7 @@ pub const List = struct {
         list.insertHead(&links[1]);
         list.insertHead(&links[0]);
 
-        try tt.expectEqual(&links[1], list.removeAfter(&links[0]));
+        try testing.expectEqual(&links[1], list.removeAfter(&links[0]));
     }
 
     /// Removes the given link from the link.
@@ -226,15 +253,16 @@ pub const List = struct {
         list.insertHead(&links[0]);
 
         list.remove(&links[0]);
-        try tt.expect(!list.contains(&links[0]));
-        try tt.expect(list.contains(&links[1]));
+        try testing.expect(!list.contains(&links[0]));
+        try testing.expect(list.contains(&links[1]));
     }
 };
 
-/// A singly-linked queue optimized for tail-insertion.
+/// An intrusive, single-linked queue optimized for tail-insertion.
 pub const Queue = struct {
     const Self = @This();
 
+    /// The link type for connecting queue items.
     pub const Link = single.Link;
 
     pub const ConstIterator = GenericIterator(true);
@@ -250,13 +278,83 @@ pub const Queue = struct {
         self.tail = &self.head;
     }
 
-    pub const isEmpty = Mixin(Self).isEmpty;
-    pub const contains = Mixin(Self).contains;
-    pub const len = Mixin(Self).len;
-    pub const get = Mixin(Self).get;
-    pub const getConst = Mixin(Self).getConst;
-    pub const constIter = Mixin(Self).constIter;
+    /// Returns true if the queue is empty.
+    ///
+    /// This operation has O(1) complexity.
+    pub fn isEmpty(self: *const Self) bool {
+        return Mixin(Self).isEmpty(self);
+    }
+
+    test isEmpty {
+        var queue: Queue = undefined;
+        queue.empty();
+        try testing.expect(queue.isEmpty());
+    }
+
+    /// Returns true if the queue contains the given link.
+    ///
+    /// This operation has O(n) complexity in the worst case.
+    pub fn contains(self: *const Self, link: *const Self.Link) bool {
+        return Mixin(Self).contains(self, link);
+    }
+
+    test contains {
+        var queue: Queue = undefined;
+        var links: [2]Queue.Link = undefined;
+
+        queue.insertTail(&links[0]);
+        queue.insertTail(&links[1]);
+        try testing.expect(queue.contains(&links[0]));
+        try testing.expect(queue.contains(&links[1]));
+    }
+
+    /// Returns the list's length.
+    ///
+    /// Consider storing and maintaining the length separately, if it is
+    /// needed frequently.
+    ///
+    /// This operation has O(n) complexity.
+    pub fn len(self: *const Self) usize {
+        return Mixin(Self).len(self);
+    }
+
+    test len {
+        var queue: Queue = undefined;
+        var links: [2]Queue.Link = undefined;
+
+        queue.insertTail(&links[0]);
+        queue.insertTail(&links[1]);
+        try testing.expectEqual(2, queue.len());
+    }
+
+    /// Returns the link at the given index.
+    ///
+    /// This operation has O(n) complexity in the worst case.
+    pub fn get(self: *Self, idx: usize) ?*Self.Link {
+        return Mixin(Self).get(self, idx);
+    }
+
+    test get {
+        var queue: Queue = undefined;
+        var links: [2]Queue.Link = undefined;
+        queue.empty();
+
+        queue.insertTail(&links[0]);
+        queue.insertTail(&links[1]);
+        try testing.expectEqual(&links[0], queue.get(0));
+        try testing.expectEqual(&links[1], queue.get(1));
+    }
+
+    /// Returns the link at the given index.
+    ///
+    /// This operation has O(n) complexity in the worst case.
+    pub fn getConst(self: *const Self, idx: usize) ?*const Self.Link {
+        return Mixin(Self).getConst(self, idx);
+    }
+
     pub const iter = Mixin(Self).iter;
+
+    pub const constIter = Mixin(Self).constIter;
 
     /// Appends the given list to this list's tail.
     pub fn concat(self: *Self, other: *const Self) void {
@@ -267,6 +365,24 @@ pub const Queue = struct {
 
         self.tail.* = other.head;
         self.tail = other.tail;
+    }
+
+    test concat {
+        var queue1: Queue = undefined;
+        queue1.empty();
+        var queue2: Queue = undefined;
+        queue2.empty();
+        var links: [4]Queue.Link = undefined;
+
+        queue1.insertTail(&links[0]);
+        queue1.insertTail(&links[1]);
+        queue2.insertTail(&links[2]);
+        queue2.insertTail(&links[3]);
+
+        queue1.concat(&queue2);
+        for (&links, 0..) |*link, i| {
+            try testing.expectEqual(link, queue1.get(i));
+        }
     }
 
     /// Inserts the given link at the head of the list.
@@ -429,20 +545,17 @@ fn Mixin(comptime Self: type) type {
     };
 }
 
-const std = @import("std");
-const assert = std.debug.assert;
-
-const tt = std.testing;
+const testing = std.testing;
 
 test "list is empty" {
     var list: List = .empty;
     var links: [2]List.Link = undefined;
-    try tt.expect(list.isEmpty());
+    try testing.expect(list.isEmpty());
 
     list.head = &links[0];
     links[0].next = &links[1];
     links[1].next = null;
-    try tt.expect(!list.isEmpty());
+    try testing.expect(!list.isEmpty());
 }
 
 test "list iter" {
@@ -455,10 +568,10 @@ test "list iter" {
 
     var it = list.iter();
     const l0 = it.next() orelse unreachable;
-    try tt.expectEqual(&links[0], l0);
+    try testing.expectEqual(&links[0], l0);
     const l1 = it.next() orelse unreachable;
-    try tt.expectEqual(&links[1], l1);
-    try tt.expectEqual(null, it.next());
+    try testing.expectEqual(&links[1], l1);
+    try testing.expectEqual(null, it.next());
 }
 
 test "list const iter" {
@@ -471,14 +584,14 @@ test "list const iter" {
 
     var it = list.constIter();
     const l0 = it.next() orelse unreachable;
-    try tt.expectEqual(&links[0], l0);
+    try testing.expectEqual(&links[0], l0);
     const l1 = it.next() orelse unreachable;
-    try tt.expectEqual(&links[1], l1);
-    try tt.expectEqual(null, it.next());
+    try testing.expectEqual(&links[1], l1);
+    try testing.expectEqual(null, it.next());
 }
 
 test "list iter remove and free" {
-    const allocator = tt.allocator;
+    const allocator = testing.allocator;
 
     var list: List = .empty;
     var links: [4]*List.Link = undefined;
@@ -495,14 +608,14 @@ test "list iter remove and free" {
     var i: usize = 0;
 
     while (it.next()) |link| {
-        try tt.expectEqual(links[i], link);
+        try testing.expectEqual(links[i], link);
         list.remove(link);
         allocator.destroy(link);
         i += 1;
     }
 
-    try tt.expectEqual(0, list.len());
-    try tt.expect(list.isEmpty());
+    try testing.expectEqual(0, list.len());
+    try testing.expect(list.isEmpty());
 }
 
 test "list contains" {
@@ -513,8 +626,8 @@ test "list contains" {
     links[0].next = &links[1];
     links[1].next = null;
 
-    try tt.expect(list.contains(&links[0]));
-    try tt.expect(list.contains(&links[1]));
+    try testing.expect(list.contains(&links[0]));
+    try testing.expect(list.contains(&links[1]));
 }
 
 test "list len" {
@@ -525,7 +638,7 @@ test "list len" {
     links[0].next = &links[1];
     links[1].next = null;
 
-    try tt.expectEqual(2, list.len());
+    try testing.expectEqual(2, list.len());
 }
 
 test "get" {
@@ -537,11 +650,11 @@ test "get" {
     list.insertAfter(&links[1], &links[2]);
     list.insertAfter(&links[2], &links[3]);
 
-    try tt.expectEqual(&links[0], list.get(0));
-    try tt.expectEqual(&links[1], list.get(1));
-    try tt.expectEqual(&links[2], list.get(2));
-    try tt.expectEqual(&links[3], list.get(3));
-    try tt.expectEqual(null, list.get(4));
+    try testing.expectEqual(&links[0], list.get(0));
+    try testing.expectEqual(&links[1], list.get(1));
+    try testing.expectEqual(&links[2], list.get(2));
+    try testing.expectEqual(&links[3], list.get(3));
+    try testing.expectEqual(null, list.get(4));
 }
 
 test "get const" {
@@ -553,11 +666,11 @@ test "get const" {
     list.insertAfter(&links[1], &links[2]);
     list.insertAfter(&links[2], &links[3]);
 
-    try tt.expectEqual(&links[0], list.getConst(0));
-    try tt.expectEqual(&links[1], list.getConst(1));
-    try tt.expectEqual(&links[2], list.getConst(2));
-    try tt.expectEqual(&links[3], list.getConst(3));
-    try tt.expectEqual(null, list.getConst(4));
+    try testing.expectEqual(&links[0], list.getConst(0));
+    try testing.expectEqual(&links[1], list.getConst(1));
+    try testing.expectEqual(&links[2], list.getConst(2));
+    try testing.expectEqual(&links[3], list.getConst(3));
+    try testing.expectEqual(null, list.getConst(4));
 }
 
 test "list insert head" {
@@ -567,8 +680,8 @@ test "list insert head" {
     list.insertHead(&links[0]);
     list.insertHead(&links[1]);
 
-    try tt.expect(list.contains(&links[0]));
-    try tt.expect(list.contains(&links[1]));
+    try testing.expect(list.contains(&links[0]));
+    try testing.expect(list.contains(&links[1]));
 }
 
 test "list insert after" {
@@ -585,12 +698,12 @@ test "list insert after" {
     const l1 = it.next() orelse unreachable;
     const l2 = it.next() orelse unreachable;
     const l3 = it.next() orelse unreachable;
-    try tt.expectEqual(null, it.next());
+    try testing.expectEqual(null, it.next());
 
-    try tt.expectEqual(l0, &links[0]);
-    try tt.expectEqual(l1, &links[1]);
-    try tt.expectEqual(l2, &links[2]);
-    try tt.expectEqual(l3, &links[3]);
+    try testing.expectEqual(l0, &links[0]);
+    try testing.expectEqual(l1, &links[1]);
+    try testing.expectEqual(l2, &links[2]);
+    try testing.expectEqual(l3, &links[3]);
 }
 
 test "queue remove" {
@@ -603,5 +716,5 @@ test "queue remove" {
 
     queue.remove(&links[1]);
     queue.remove(&links[0]);
-    try tt.expect(queue.isEmpty());
+    try testing.expect(queue.isEmpty());
 }

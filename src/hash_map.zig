@@ -590,7 +590,7 @@ pub fn HashMapContext(
         pub fn clear(self: *Self) void {
             self.pointer_stability.assertUnlocked();
 
-            if (self.notAllocated()) {
+            if (!self.isAllocated()) {
                 @branchHint(.unlikely);
                 assert(self.remaining_capacity == 0 and self.len == 0);
                 return;
@@ -1061,11 +1061,7 @@ pub fn HashMapContext(
 
         pub const removeFetch = if (is_zst_ctx) zst_ctx.removeFetch else {};
 
-        // FIXME: without this, removal works correctly ... where is the bug?
-        fn isLastInSequence(
-            self: *const Self,
-            entry_idx: usize,
-        ) bool {
+        fn isLastInSequence(self: *const Self, entry_idx: usize) bool {
             const idx_before = if (comptime options.probing_strategy == .cache_line)
                 CacheLineProbe.start(entry_idx).prev(self.entry_mask)
             else
@@ -1265,46 +1261,6 @@ pub fn HashMapContext(
             }
         }
 
-        fn probeGetRemoveIdx(self: *Self, probe: *Probe, key: Key, hint: Metadata, ctx: Context) ?usize {
-            while (true) {
-                // Search for a metadata block containing the correct hash hint
-                // for the queried key in accordance with the probing sequence.
-                const block = self.getMetadataBlock(probe.pos);
-
-                // Search for any matching metadata slot and equal key.
-                var matches = block.findAll(hint);
-                while (nextBit(&matches)) |relative_idx| {
-                    const metadata_idx = metadataIdx(probe, relative_idx);
-                    const entry_idx = self.eqlKey(key, hint, metadata_idx, ctx) orelse continue;
-
-                    var is_last: bool = false;
-                    if (relative_idx < Metadata.Block.len - 1) {
-                        const metadata_idx_next = metadataIdx(probe, relative_idx + 1);
-                        is_last = self.metadata[metadata_idx_next].isEmpty();
-                    } else {
-                        const next = probe.next(self.entry_mask);
-                        is_last = self.metadata[next].isEmpty();
-                    }
-
-                    //if (false and is_last) {
-                    //    self.remaining_capacity += 1;
-                    //    self.insertMetadata(entry_idx, .empty);
-                    //} else {
-                    //    self.insertMetadata(entry_idx, .deleted);
-                    //}
-                    self.insertMetadata(entry_idx, .deleted);
-                }
-
-                // Upon encountering an empty slot within a probed block stop
-                // searching further.
-                if (block.find(.empty)) |_|
-                    return null;
-
-                // Try the next block in the probe sequence.
-                _ = probe.next(self.entry_mask);
-            }
-        }
-
         fn probeGetIdx(
             self: *const Self,
             probe: *Probe,
@@ -1408,7 +1364,7 @@ pub fn HashMapContext(
 
         /// Returs a const pointer to the current buffer allocation, if any.
         fn getConstBuffer(self: *const Self) ?*const Buffer {
-            if (self.notAllocated()) {
+            if (!self.isAllocated()) {
                 @branchHint(.unlikely);
                 return null;
             }
@@ -1492,6 +1448,7 @@ pub fn HashMapContext(
                 &buffer.header.kvs[entry_idx].value;
         }
 
+        /// Set the key-value pair for the given entry idx.
         fn setKV(self: *Self, entry_idx: usize, key: Key, value: Value) void {
             self.getKey(entry_idx).* = key;
             self.getValue(entry_idx).* = value;
@@ -1508,10 +1465,14 @@ pub fn HashMapContext(
             return @truncate(hash & self.entry_mask);
         }
 
+        /// Returns true if the given entry index belongs to the same block as
+        /// the given probe position.
         fn isInSameBlock(self: *const Self, probe: *const Probe, entry_idx: usize) bool {
             return self.getRelativeIdx(probe, entry_idx) != null;
         }
 
+        /// Returns the index relative to the given probing position for the
+        /// given entry index, if both belong to the same metadata block.
         fn getRelativeIdx(self: *const Self, probe: *const Probe, entry_idx: usize) ?usize {
             const diff = entry_idx -% probe.pos;
             const relative_idx = if (comptime options.probing_strategy == .cache_line) blk: {
@@ -1523,18 +1484,23 @@ pub fn HashMapContext(
             return if (relative_idx < Metadata.Block.len) relative_idx else null;
         }
 
+        /// Returns the mirror index for the given entry index.
+        ///
+        /// The mirror index will be identical with the entry index for all
+        /// indices other than 0..(Metadata.Block.len).
         fn getMirrorIdx(self: *const Self, entry_idx: usize) usize {
             return ((entry_idx -% Metadata.Block.len) & self.entry_mask) + Metadata.Block.len;
         }
 
+        /// Returns the total possible capacity for the current allocation.
         fn getUsableCapacity(self: *const Self) usize {
             return if (self.entry_mask == 0) 0 else applyLoadLimit(self.entry_mask);
         }
 
-        fn notAllocated(self: *const Self) bool {
-            const zero_capacity = self.entry_mask == 0;
-            assert(!zero_capacity or self.metadata == @as([*]const Metadata, @ptrCast(&empty_block)));
-            return zero_capacity;
+        fn isAllocated(self: *const Self) bool {
+            const not_zero_capacity = self.entry_mask != 0;
+            assert(not_zero_capacity or self.metadata == @as([*]const Metadata, @ptrCast(&empty_block)));
+            return not_zero_capacity;
         }
 
         fn containsKeyPtr(self: *const Self, key: *const Key) bool {
@@ -2196,7 +2162,7 @@ test "reserve" {
     defer map.deinit(testing.allocator);
 
     try map.reserve(testing.allocator, 1);
-    try testing.expect(map.notAllocated() == false);
+    try testing.expect(map.isAllocated() == true);
     try testing.expectEqual(0, map.len);
     try testing.expectEqual(14, map.remaining_capacity);
 }
@@ -2225,7 +2191,14 @@ test "insert (cache-line probing)" {
 test "remove (cache-line probing)" {
     const allocator = testing.allocator;
 
-    var map: HashMap(u32, u32, .{ .probing_strategy = .cache_line, .max_load_percentage = 100 }) = .empty;
+    if (Metadata.Block.len != 16 or cache_line.len != 128)
+        return error.SkipZigTest;
+
+    const Map = HashMap(u32, u32, .{
+        .probing_strategy = .cache_line,
+        .max_load_percentage = 100,
+    });
+    var map: Map = .empty;
     defer map.deinit(allocator);
 
     var i: u32 = 0;
@@ -2235,6 +2208,101 @@ test "remove (cache-line probing)" {
 
     try testing.expectEqual(511, map.len);
     try testing.expectEqual(0, map.remaining_capacity);
+    try testing.expectEqual(511, Map.applyLoadLimit(map.entry_mask));
+
+    const blocks = map.getMetadataBlocks();
+    try testing.expectEqual(blocks.len, 32 + 1);
+
+    const block0: [16]u8 = @bitCast(blocks[0]);
+    const block1: [16]u8 = @bitCast(blocks[1]);
+    const block2: [16]u8 = @bitCast(blocks[2]);
+    const block3: [16]u8 = @bitCast(blocks[3]);
+    const block4: [16]u8 = @bitCast(blocks[4]);
+    const block5: [16]u8 = @bitCast(blocks[5]);
+    const block6: [16]u8 = @bitCast(blocks[6]);
+    const block7: [16]u8 = @bitCast(blocks[7]);
+    const blockN: [16]u8 = @bitCast(blocks[32]);
+
+    const exp0: []const u8 = &.{
+        0x52, 0x48, 0x59, 0x1a, 0x7f, 0x56, 0x6d, 0x5d,
+        0x01, 0x73, 0x49, 0x37, 0x68, 0x02, 0x78, 0x04,
+    };
+    const exp1: []const u8 = &.{
+        0x5a, 0x2e, 0x75, 0x0c, 0x62, 0x44, 0x7c, 0x28,
+        0x62, 0x27, 0x00, 0x26, 0x51, 0x42, 0x04, 0x50,
+    };
+    const exp2: []const u8 = &.{
+        0xFF, 0x3C, 0x43, 0x73, 0x41, 0x2E, 0x21, 0x5B,
+        0x23, 0x1F, 0x5D, 0x7A, 0x13, 0x71, 0x61, 0x34,
+    };
+    const exp3: []const u8 = &.{
+        0x50, 0x38, 0x46, 0x7D, 0x02, 0x01, 0x4F, 0x6C,
+        0x37, 0x76, 0x34, 0x58, 0x7D, 0x71, 0x63, 0x49,
+    };
+    const exp4: []const u8 = &.{
+        0x3A, 0x4A, 0x14, 0x06, 0x10, 0x3E, 0x67, 0x42,
+        0x1C, 0x42, 0x6D, 0x40, 0x76, 0x08, 0x6D, 0x75,
+    };
+    const exp5: []const u8 = &.{
+        0x19, 0x32, 0x17, 0x13, 0x3C, 0x0F, 0x3F, 0x63,
+        0x59, 0x2C, 0x51, 0x23, 0x47, 0x1E, 0x6F, 0x14,
+    };
+    const exp6: []const u8 = &.{
+        0x10, 0x6E, 0x77, 0x26, 0x61, 0x4E, 0x78, 0x5E,
+        0x79, 0x72, 0x54, 0x35, 0x55, 0x0B, 0x35, 0x40,
+    };
+    const exp7: []const u8 = &.{
+        0x4F, 0x57, 0x78, 0x64, 0x47, 0x05, 0x25, 0x44,
+        0x3C, 0x49, 0x05, 0x0D, 0x39, 0x17, 0x7B, 0x5B,
+    };
+
+    try testing.expectEqualSlices(u8, exp0, &block0);
+    try testing.expectEqualSlices(u8, exp1, &block1);
+    try testing.expectEqualSlices(u8, exp2, &block2);
+    try testing.expectEqualSlices(u8, exp3, &block3);
+    try testing.expectEqualSlices(u8, exp4, &block4);
+    try testing.expectEqualSlices(u8, exp5, &block5);
+    try testing.expectEqualSlices(u8, exp6, &block6);
+    try testing.expectEqualSlices(u8, exp7, &block7);
+    try testing.expectEqualSlices(u8, &block0, &blockN);
+
+    // 8 bytes from the end, 8 bytes from the start due to cache-line wrap around.
+    const unaligned_block: [16]u8 = @bitCast(map.getMetadataBlock(120));
+    const expected: []const u8 = &.{
+        0x3C, 0x49, 0x05, 0x0D, 0x39, 0x17, 0x7B, 0x5B,
+        0x52, 0x48, 0x59, 0x1a, 0x7f, 0x56, 0x6d, 0x5d,
+    };
+
+    try testing.expectEqualSlices(u8, expected, &unaligned_block);
+
+    // relative index should wrap around at cache-line
+    const probe = CacheLineProbe.start(120);
+    try testing.expectEqual(0, map.getRelativeIdx(&probe, 120));
+    try testing.expectEqual(1, map.getRelativeIdx(&probe, 121));
+    try testing.expectEqual(2, map.getRelativeIdx(&probe, 122));
+    try testing.expectEqual(3, map.getRelativeIdx(&probe, 123));
+    try testing.expectEqual(4, map.getRelativeIdx(&probe, 124));
+    try testing.expectEqual(5, map.getRelativeIdx(&probe, 125));
+    try testing.expectEqual(6, map.getRelativeIdx(&probe, 126));
+    try testing.expectEqual(7, map.getRelativeIdx(&probe, 127));
+    try testing.expectEqual(null, map.getRelativeIdx(&probe, 128));
+    try testing.expectEqual(null, map.getRelativeIdx(&probe, 129));
+    try testing.expectEqual(null, map.getRelativeIdx(&probe, 130));
+    try testing.expectEqual(8, map.getRelativeIdx(&probe, 0));
+    try testing.expectEqual(9, map.getRelativeIdx(&probe, 1));
+    try testing.expectEqual(10, map.getRelativeIdx(&probe, 2));
+    try testing.expectEqual(11, map.getRelativeIdx(&probe, 3));
+    try testing.expectEqual(12, map.getRelativeIdx(&probe, 4));
+    try testing.expectEqual(13, map.getRelativeIdx(&probe, 5));
+    try testing.expectEqual(14, map.getRelativeIdx(&probe, 6));
+    try testing.expectEqual(15, map.getRelativeIdx(&probe, 7));
+
+    try testing.expectEqual(512, map.getMirrorIdx(0));
+    try testing.expectEqual(513, map.getMirrorIdx(1));
+    try testing.expectEqual(514, map.getMirrorIdx(2));
+    try testing.expectEqual(515, map.getMirrorIdx(3));
+    try testing.expectEqual(527, map.getMirrorIdx(15));
+    try testing.expectEqual(16, map.getMirrorIdx(16));
 }
 
 test "get or insert u32" {

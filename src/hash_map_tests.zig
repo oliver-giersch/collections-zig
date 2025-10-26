@@ -389,8 +389,3 @@ test "random insert/remove 1e6" {
         try testRandomInsertRemoveN(options, 1_000_000, false);
     }
 }
-
-test "debug test" {
-    const options: Options = .{ .layout = .array, .probing_strategy = .cache_line, .max_load_percentage = 100 };
-    try testRandomInsertRemoveN(options, 1_000_000, true);
-}

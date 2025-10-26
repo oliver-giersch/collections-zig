@@ -1,13 +1,21 @@
 const double = @This();
 
+const std = @import("std");
+const assert = std.debug.assert;
+
+/// An intrusive, double-linked list.
 pub const List = extern struct {
     const Self = @This();
 
+    /// The initializer value for an empty list.
     pub const empty: Self = .{ .head = null };
 
+    /// The link type for connecting list items.
     pub const Link = double.Link;
 
+    /// A forward const iterator over all links in the list.
     pub const ConstIterator = GenericIterator(true);
+    /// A forward iterator over all links in the list.
     pub const Iterator = GenericIterator(false);
 
     fn GenericIterator(comptime is_const: bool) type {
@@ -44,6 +52,7 @@ pub const List = extern struct {
         };
     }
 
+    /// The list's head link.
     head: ?*Self.Link,
 
     /// Returns true if the queue is empty.
@@ -60,14 +69,46 @@ pub const List = extern struct {
         return Mixin(Self).contains(self, link);
     }
 
-    pub fn constIter(self: *const Self) ConstIterator {
-        return .{ .ptr = &self.head };
+    /// Returns the list's length.
+    ///
+    /// Consider storing and maintaining the length separately, if it is
+    /// needed frequently.
+    ///
+    /// This operation has O(n) complexity.
+    pub fn len(self: *const Self) usize {
+        return Mixin(Self).len(self);
     }
 
+    /// Returns the link at the given index.
+    ///
+    /// This operation has O(n) complexity in the worst case.
+    pub fn get(self: *Self, idx: usize) ?*Self.Link {
+        return Mixin(Self).get(self, idx);
+    }
+
+    /// Returns the link at the given index.
+    ///
+    /// This operation has O(n) complexity in the worst case.
+    pub fn getConst(self: *const Self, idx: usize) ?*const Self.Link {
+        return Mixin(Self).getConst(self, idx);
+    }
+
+    /// Returns an iterator over the items in the list.
     pub fn iter(self: *Self) Iterator {
         return .{ .ptr = &self.head };
     }
 
+    /// Returns a const iterator over the items in the list.
+    pub fn constIter(self: *const Self) ConstIterator {
+        return .{ .ptr = &self.head };
+    }
+
+    /// Inserts the given link at the list's head.
+    ///
+    /// Asserts that the list does not yet contain the given link.
+    /// The given link may be uninitialized.
+    ///
+    /// This operation has O(1) complexity.
     pub fn insertHead(self: *Self, link: *Self.Link) void {
         assert(!self.contains(link));
 
@@ -80,6 +121,12 @@ pub const List = extern struct {
         }
     }
 
+    /// Inserts the given link after the given predecessor link.
+    ///
+    /// Asserts that the list contains the predecessor but not the link itself.
+    /// The given link may be uninitialized.
+    ///
+    /// This operation has O(1) complexity.
     pub fn insertAfter(self: *Self, after: *Self.Link, link: *Self.Link) void {
         assert(self.contains(after));
         assert(!self.contains(link));
@@ -115,6 +162,23 @@ pub const List = extern struct {
         return link;
     }
 
+    /// Removes and returns the link after the given link.
+    ///
+    /// This operation has O(1) complexity.
+    pub fn removeAfter(self: *Self, after: *Self.Link) ?*Self.Link {
+        assert(self.contains(after));
+
+        const link = after.next orelse return null;
+        link.prev.* = link.next;
+        if (link.next) |next| {
+            @branchHint(.likely);
+            next.prev = &after.next;
+        }
+
+        link.* = undefined;
+        return link;
+    }
+
     pub fn remove(self: *Self, link: *Self.Link) void {
         assert(self.contains(link));
 
@@ -126,9 +190,21 @@ pub const List = extern struct {
 
         link.* = undefined;
     }
+
+    test remove {
+        var list: List = .empty;
+        var links: [2]List.Link = undefined;
+
+        list.insertHead(&links[0]);
+        list.insertHead(&links[1]);
+
+        list.remove(&links[0]);
+        try testing.expect(!list.contains(&links[0]));
+        try testing.expect(list.contains(&links[1]));
+    }
 };
 
-/// An intrusive, doubly-linked queue optimized for tail insertion.
+/// An intrusive, double-linked queue optimized for tail insertion.
 pub const Queue = extern struct {
     const Self = @This();
 
@@ -211,19 +287,19 @@ pub const Queue = extern struct {
         return Mixin(Self).getConst(self, idx);
     }
 
-    pub fn constIter(self: *const Self) ConstForwardIterator {
-        return .{ .link = self.head };
-    }
-
     pub fn iter(self: *Self) ForwardIterator {
         return .{ .link = self.head };
     }
 
-    pub fn constReverseIter(self: *const Self) ConstReverseIterator {
-        return .{ .link = getLink(self.tail) };
+    pub fn constIter(self: *const Self) ConstForwardIterator {
+        return .{ .link = self.head };
     }
 
     pub fn reverseIter(self: *Self) ReverseIterator {
+        return .{ .link = getLink(self.tail) };
+    }
+
+    pub fn constReverseIter(self: *const Self) ConstReverseIterator {
         return .{ .link = getLink(self.tail) };
     }
 
@@ -338,11 +414,11 @@ pub const Cursor = struct {
             queue.insertTail(link);
 
         var cur = queue.cursor();
-        try tt.expectEqual(&links[0], cur.moveNext());
-        try tt.expectEqual(&links[1], cur.moveNext());
-        try tt.expectEqual(&links[2], cur.moveNext());
-        try tt.expectEqual(&links[3], cur.moveNext());
-        try tt.expectEqual(null, cur.moveNext());
+        try testing.expectEqual(&links[0], cur.moveNext());
+        try testing.expectEqual(&links[1], cur.moveNext());
+        try testing.expectEqual(&links[2], cur.moveNext());
+        try testing.expectEqual(&links[3], cur.moveNext());
+        try testing.expectEqual(null, cur.moveNext());
     }
 
     pub fn insertNext(self: *Cursor, link: *Link) void {
@@ -367,14 +443,14 @@ pub const Cursor = struct {
         queue.insertTail(&links[3]);
 
         var cur = queue.cursor();
-        try tt.expectEqual(&links[0], cur.moveNext());
-        try tt.expectEqual(&links[1], cur.moveNext());
+        try testing.expectEqual(&links[0], cur.moveNext());
+        try testing.expectEqual(&links[1], cur.moveNext());
         cur.insertNext(&links[2]);
-        try tt.expectEqual(&links[2], cur.moveNext());
-        try tt.expectEqual(&links[3], cur.moveNext());
+        try testing.expectEqual(&links[2], cur.moveNext());
+        try testing.expectEqual(&links[3], cur.moveNext());
 
         for (&links, 0..) |*link, i|
-            try tt.expectEqual(link, queue.get(i));
+            try testing.expectEqual(link, queue.get(i));
     }
 
     pub fn removeNext(self: *Cursor) ?*Link {
@@ -446,10 +522,7 @@ fn Mixin(comptime Self: type) type {
     };
 }
 
-const std = @import("std");
-const assert = std.debug.assert;
-
-const tt = std.testing;
+const testing = std.testing;
 
 test "queue cursor" {
     var queue: Queue = undefined;
@@ -460,15 +533,15 @@ test "queue cursor" {
         queue.insertTail(link);
 
     var cur = queue.cursor();
-    try tt.expectEqual(&links[0], cur.moveNext());
-    try tt.expectEqual(&links[1], cur.moveNext());
-    try tt.expectEqual(&links[2], cur.moveNext());
-    try tt.expectEqual(&links[3], cur.moveNext());
-    try tt.expectEqual(null, cur.moveNext());
-    try tt.expectEqual(&links[3], cur.movePrev());
-    try tt.expectEqual(&links[2], cur.movePrev());
-    try tt.expectEqual(&links[1], cur.movePrev());
-    try tt.expectEqual(&links[0], cur.movePrev());
-    try tt.expectEqual(null, cur.movePrev());
-    try tt.expectEqual(&links[0], cur.moveNext());
+    try testing.expectEqual(&links[0], cur.moveNext());
+    try testing.expectEqual(&links[1], cur.moveNext());
+    try testing.expectEqual(&links[2], cur.moveNext());
+    try testing.expectEqual(&links[3], cur.moveNext());
+    try testing.expectEqual(null, cur.moveNext());
+    try testing.expectEqual(&links[3], cur.movePrev());
+    try testing.expectEqual(&links[2], cur.movePrev());
+    try testing.expectEqual(&links[1], cur.movePrev());
+    try testing.expectEqual(&links[0], cur.movePrev());
+    try testing.expectEqual(null, cur.movePrev());
+    try testing.expectEqual(&links[0], cur.moveNext());
 }
