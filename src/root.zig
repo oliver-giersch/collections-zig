@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const tt = std.testing;
+const testing = std.testing;
 const assert = std.debug.assert;
 
 const array_list = @import("array_list.zig");
@@ -12,11 +12,11 @@ comptime {
     _ = hash_map;
 }
 
+const Log2Int = std.math.Log2Int(usize);
 const runtime_safety = switch (@import("builtin").mode) {
     .Debug, .ReleaseSafe => true,
     else => false,
 };
-const Log2Int = std.math.Log2Int(usize);
 
 pub const BoundedArrayList = array_list.BoundedArrayList;
 pub const BoundedArrayListAligned = array_list.BoundedArrayListAligned;
@@ -90,19 +90,19 @@ pub fn nextPow2(v: usize) OOM!usize {
 }
 
 test "next power of 2" {
-    try tt.expectEqual(1, try nextPow2(1));
-    try tt.expectEqual(2, try nextPow2(2));
-    try tt.expectEqual(4, try nextPow2(3));
-    try tt.expectEqual(4, try nextPow2(4));
-    try tt.expectEqual(8, try nextPow2(5));
-    try tt.expectEqual(8, try nextPow2(7));
-    try tt.expectEqual(8, try nextPow2(8));
-    try tt.expectEqual(32, try nextPow2(17));
-    try tt.expectEqual(32, try nextPow2(31));
-    try tt.expectEqual(32, try nextPow2(32));
-    try tt.expectEqual(64, try nextPow2(63));
-    try tt.expectEqual(0x8000000000000000, try nextPow2(0x7FFFFFFFFFFFFFFF));
-    try tt.expectError(oom, nextPow2(~@as(usize, 0)));
+    try testing.expectEqual(1, try nextPow2(1));
+    try testing.expectEqual(2, try nextPow2(2));
+    try testing.expectEqual(4, try nextPow2(3));
+    try testing.expectEqual(4, try nextPow2(4));
+    try testing.expectEqual(8, try nextPow2(5));
+    try testing.expectEqual(8, try nextPow2(7));
+    try testing.expectEqual(8, try nextPow2(8));
+    try testing.expectEqual(32, try nextPow2(17));
+    try testing.expectEqual(32, try nextPow2(31));
+    try testing.expectEqual(32, try nextPow2(32));
+    try testing.expectEqual(64, try nextPow2(63));
+    try testing.expectEqual(0x8000000000000000, try nextPow2(0x7FFFFFFFFFFFFFFF));
+    try testing.expectError(oom, nextPow2(~@as(usize, 0)));
 }
 
 pub fn isPow2(v: usize) bool {
@@ -111,23 +111,23 @@ pub fn isPow2(v: usize) bool {
 }
 
 test "is power of 2" {
-    try tt.expect(isPow2(1));
-    try tt.expect(isPow2(2));
-    try tt.expect(isPow2(4));
-    try tt.expect(isPow2(8));
-    try tt.expect(isPow2(16));
-    try tt.expect(isPow2(32));
-    try tt.expect(isPow2(64));
-    try tt.expect(isPow2(4096));
+    try testing.expect(isPow2(1));
+    try testing.expect(isPow2(2));
+    try testing.expect(isPow2(4));
+    try testing.expect(isPow2(8));
+    try testing.expect(isPow2(16));
+    try testing.expect(isPow2(32));
+    try testing.expect(isPow2(64));
+    try testing.expect(isPow2(4096));
 
-    try tt.expect(!isPow2(3));
-    try tt.expect(!isPow2(5));
-    try tt.expect(!isPow2(6));
-    try tt.expect(!isPow2(12));
-    try tt.expect(!isPow2(17));
-    try tt.expect(!isPow2(33));
-    try tt.expect(!isPow2(55));
-    try tt.expect(!isPow2(9000));
+    try testing.expect(!isPow2(3));
+    try testing.expect(!isPow2(5));
+    try testing.expect(!isPow2(6));
+    try testing.expect(!isPow2(12));
+    try testing.expect(!isPow2(17));
+    try testing.expect(!isPow2(33));
+    try testing.expect(!isPow2(55));
+    try testing.expect(!isPow2(9000));
 }
 
 fn log2(v: usize) Log2Int {

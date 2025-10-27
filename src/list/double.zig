@@ -150,6 +150,9 @@ pub const List = extern struct {
         before.prev = &link.next;
     }
 
+    /// Removes and returns the list's head.
+    ///
+    /// This operation has O(1) complexity.
     pub fn removeHead(self: *Self) ?*Self.Link {
         const link = self.head orelse return null;
         self.head = link.next;
@@ -160,6 +163,18 @@ pub const List = extern struct {
 
         link.* = undefined;
         return link;
+    }
+
+    test removeHead {
+        var list: List = .empty;
+        var links: [2]List.Link = undefined;
+
+        list.insertHead(&links[1]);
+        list.insertHead(&links[0]);
+
+        try testing.expectEqual(&links[0], list.removeHead());
+        try testing.expectEqual(&links[1], list.removeHead());
+        try testing.expectEqual(null, list.removeHead());
     }
 
     /// Removes and returns the link after the given link.
@@ -179,6 +194,21 @@ pub const List = extern struct {
         return link;
     }
 
+    test removeAfter {
+        var list: List = .empty;
+        var links: [2]List.Link = undefined;
+
+        list.insertHead(&links[1]);
+        list.insertHead(&links[0]);
+
+        try testing.expectEqual(&links[1], list.removeAfter(&links[0]));
+    }
+
+    /// Removes the given link from the queue.
+    ///
+    /// Asserts that the queue contains the given link.
+    ///
+    /// This operation has O(1) complexity.
     pub fn remove(self: *Self, link: *Self.Link) void {
         assert(self.contains(link));
 
@@ -262,6 +292,12 @@ pub const Queue = extern struct {
         return Mixin(Self).isEmpty(self);
     }
 
+    test isEmpty {
+        var queue: Queue = undefined;
+        queue.empty();
+        try testing.expect(queue.isEmpty());
+    }
+
     /// Returns true if the queue contains the given link.
     ///
     /// This operation has O(n) complexity in the worst case.
@@ -279,18 +315,35 @@ pub const Queue = extern struct {
         return Mixin(Self).len(self);
     }
 
+    test len {
+        var queue: Queue = undefined;
+        var links: [2]Queue.Link = undefined;
+
+        queue.insertTail(&links[0]);
+        queue.insertTail(&links[1]);
+        try testing.expectEqual(2, queue.len());
+    }
+
+    /// Returns the link at the given index.
+    ///
+    /// This operation has O(n) complexity in the worst case.
     pub fn get(self: *Self, idx: usize) ?*Self.Link {
         return Mixin(Self).get(self, idx);
     }
 
+    /// Returns the link at the given index.
+    ///
+    /// This operation has O(n) complexity in the worst case.
     pub fn getConst(self: *const Self, idx: usize) ?*const Self.Link {
         return Mixin(Self).getConst(self, idx);
     }
 
+    /// Returns an iterator over the items in the list.
     pub fn iter(self: *Self) ForwardIterator {
         return .{ .link = self.head };
     }
 
+    /// Returns a const iterator over the items in the list.
     pub fn constIter(self: *const Self) ConstForwardIterator {
         return .{ .link = self.head };
     }
@@ -307,6 +360,39 @@ pub const Queue = extern struct {
         return .{ .ptr = &self.head, .queue = self };
     }
 
+    /// Appends the given list to this list's tail.
+    ///
+    /// This operation has O(1) complexity.
+    pub fn concat(self: *Self, other: *const Self) void {
+        const other_head = other.head orelse {
+            @branchHint(.unlikely);
+            return;
+        };
+
+        self.tail.* = other.head;
+        other_head.prev = self.tail;
+        self.tail = other.tail;
+    }
+
+    /// Inserts the given link at the list's head.
+    ///
+    /// This operation has O(1) complexity.
+    pub fn insertHead(self: *Self, link: *Self.Link) void {
+        assert(!self.contains(link));
+
+        link.next = self.head;
+        self.head = link;
+        if (link.next) |next| {
+            @branchHint(.likely);
+            next.prev = &link.next;
+        } else {
+            self.tail = &link.next;
+        }
+    }
+
+    /// Inserts the given link at the queue's tail.
+    ///
+    /// This operation has O(1) complexity.
     pub fn insertTail(self: *Self, link: *Self.Link) void {
         assert(!self.contains(link));
 
@@ -316,6 +402,12 @@ pub const Queue = extern struct {
         self.tail = &link.next;
     }
 
+    /// Inserts the given link after the given predecessor link.
+    ///
+    /// Asserts that the list contains the predecessor but not the link itself.
+    /// The given link may be uninitialized.
+    ///
+    /// This operation has O(1) complexity.
     pub fn insertAfter(self: *Self, after: *Self.Link, link: *Self.Link) void {
         assert(self.contains(after));
         assert(!self.contains(link));
@@ -339,6 +431,38 @@ pub const Queue = extern struct {
         before.prev = &link.next;
     }
 
+    /// Removes and returns the queue's head.
+    ///
+    /// This operation has O(1) complexity.
+    pub fn removeHead(self: *Self) ?*Self.Link {
+        const link = self.head orelse return null;
+        self.head = link.next;
+        if (link.next) |next| {
+            @branchHint(.likely);
+            next.prev = link.prev;
+        } else {
+            self.tail = &self.head;
+        }
+
+        link.* = undefined;
+        return link;
+    }
+
+    /// Removes and returns the queue's tail.
+    ///
+    /// This operation has O(1) complexity.
+    pub fn removeTail(self: *Self) ?*Self.Link {
+        const link = self.tail.* orelse return null;
+        self.tail = link.prev;
+        self.tail.* = null;
+
+        link.* = undefined;
+        return link;
+    }
+
+    /// Removes and returns the link after the given link.
+    ///
+    /// This operation has O(1) complexity.
     pub fn removeAfter(self: *Self, after: *Self.Link) ?*Self.Link {
         assert(self.contains(after));
 
@@ -361,11 +485,16 @@ pub const Queue = extern struct {
         const link = getLink(before.prev) orelse return null;
         link.prev.* = before;
         before.prev = link.prev;
-        link.* = undefined;
 
+        link.* = undefined;
         return link;
     }
 
+    /// Removes the given link from the queue.
+    ///
+    /// Asserts that the queue contains the given link.
+    ///
+    /// This operation has O(1) complexity.
     pub fn remove(self: *Self, link: *Self.Link) void {
         assert(self.contains(link));
 
@@ -478,8 +607,11 @@ pub const Cursor = struct {
     }
 };
 
+/// A link in a double-linked list or queue.
 pub const Link = extern struct {
+    /// The pointer to the next link.
     next: ?*Link,
+    /// The pointer to the previous link's next pointer.
     prev: *?*Link,
 };
 

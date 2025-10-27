@@ -186,7 +186,7 @@ pub const List = struct {
         try testing.expectEqual(&links[1], list.getConst(1));
     }
 
-    /// Removes the head link from the list.
+    /// Removes and returns the list's head.
     ///
     /// This operation has O(1) complexity.
     pub fn removeHead(self: *Self) ?*Self.Link {
@@ -268,11 +268,17 @@ pub const Queue = struct {
     pub const ConstIterator = GenericIterator(true);
     pub const Iterator = GenericIterator(false);
 
-    /// The head of the queue.
+    /// The queue's head.
     head: ?*Self.Link,
     /// The pointer to the tail of the queue.
+    ///
+    /// This is a pointer to the pointer to the tail link.
+    /// Points at `&self.head`, if the queue is empty.
+    ///
+    /// Copying an empty queue invalidates this field.
     tail: *?*Self.Link,
 
+    /// Initialize the queue as empty.
     pub fn empty(self: *Self) void {
         self.head = null;
         self.tail = &self.head;
@@ -352,9 +358,15 @@ pub const Queue = struct {
         return Mixin(Self).getConst(self, idx);
     }
 
-    pub const iter = Mixin(Self).iter;
+    /// Returns an iterator over the items in the list.
+    pub fn iter(self: *Self) Iterator {
+        return Mixin(Self).iter(self);
+    }
 
-    pub const constIter = Mixin(Self).constIter;
+    /// Returns a const iterator over the items in the list.
+    pub fn constIter(self: *const Self) ConstIterator {
+        return Mixin(Self).constIter(self);
+    }
 
     /// Appends the given list to this list's tail.
     pub fn concat(self: *Self, other: *const Self) void {
@@ -385,7 +397,9 @@ pub const Queue = struct {
         }
     }
 
-    /// Inserts the given link at the head of the list.
+    /// Inserts the given link at the list's head.
+    ///
+    /// This operation has O(1) complexity.
     pub fn insertHead(self: *Self, link: *Self.Link) void {
         assert(!self.contains(link));
 
@@ -397,6 +411,9 @@ pub const Queue = struct {
         }
     }
 
+    /// Inserts the given link at the queue's tail.
+    ///
+    /// This operation has O(1) complexity.
     pub fn insertTail(self: *Self, link: *Self.Link) void {
         assert(!self.contains(link));
 
@@ -405,6 +422,12 @@ pub const Queue = struct {
         self.tail = &link.next;
     }
 
+    /// Inserts the given link after the given predecessor link.
+    ///
+    /// Asserts that the list contains the predecessor but not the link itself.
+    /// The given link may be uninitialized.
+    ///
+    /// This operation has O(1) complexity.
     pub fn insertAfter(self: *Self, after: *Self.Link, link: *Self.Link) void {
         assert(self.contains(after));
         assert(!self.contains(link));
@@ -417,6 +440,9 @@ pub const Queue = struct {
         }
     }
 
+    /// Removes and returns the queue's head.
+    ///
+    /// This operation has O(1) complexity.
     pub fn removeHead(self: *Self) ?*Self.Link {
         const link = self.head orelse return null;
         self.head = link.next;
@@ -429,6 +455,9 @@ pub const Queue = struct {
         return link;
     }
 
+    /// Removes and returns the queue's tail.
+    ///
+    /// This operation has O(1) complexity.
     pub fn removeTail(self: *Self) ?*Self.Link {
         const link = self.tail.* orelse return null;
         const prev = Mixin(Self).findPrev(self, link);
@@ -439,6 +468,24 @@ pub const Queue = struct {
         return link;
     }
 
+    /// Removes and returns the link after the given link.
+    ///
+    /// This operation has O(1) complexity.
+    pub fn removeAfter(self: *Self, after: *Self.Link) ?*Self.Link {
+        assert(self.contains(after));
+
+        const link = after.next orelse return null;
+        after.next = link.next;
+
+        link.* = undefined;
+        return link;
+    }
+
+    /// Removes the given link from the queue.
+    ///
+    /// Asserts that the queue contains the given link.
+    ///
+    /// This operation has O(1) complexity.
     pub fn remove(self: *Self, link: *Self.Link) void {
         assert(self.contains(link));
 
@@ -449,6 +496,19 @@ pub const Queue = struct {
             self.tail = prev;
         }
         link.* = undefined;
+    }
+
+    test remove {
+        var queue: Queue = undefined;
+        queue.empty();
+        var links: [2]Queue.Link = undefined;
+
+        queue.insertHead(&links[0]);
+        queue.insertHead(&links[1]);
+
+        queue.remove(&links[0]);
+        try testing.expect(!queue.contains(&links[0]));
+        try testing.expect(queue.contains(&links[1]));
     }
 };
 

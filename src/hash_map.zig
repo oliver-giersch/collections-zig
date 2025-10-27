@@ -1497,6 +1497,7 @@ pub fn HashMapContext(
             return if (self.entry_mask == 0) 0 else applyLoadLimit(self.entry_mask);
         }
 
+        /// Returns true if the map is backed by an allocated buffer.
         fn isAllocated(self: *const Self) bool {
             const not_zero_capacity = self.entry_mask != 0;
             assert(not_zero_capacity or self.metadata == @as([*]const Metadata, @ptrCast(&empty_block)));
