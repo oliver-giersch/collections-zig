@@ -321,6 +321,7 @@ pub fn HashMapContext(
             entry_idx: usize,
             current_block: Metadata.BitMask = 0,
 
+            /// Returns the next populated entry index and advances the iterator.
             pub fn next(self: *EntryIterator, map: *const Self) ?usize {
                 if (self.remaining_len == 0)
                     return null;
@@ -367,6 +368,7 @@ pub fn HashMapContext(
             else
                 @alignOf(KeyValue));
 
+            /// The alignment units of the Buffer type.
             const alignment = Alignment.fromByteUnits(buffer_alignment);
 
             /// The header contains pointers to the variable length array(s)
@@ -469,16 +471,17 @@ pub fn HashMapContext(
             }
         };
 
+        /// The memory layout for a key-value pair with flat array layout.
+        const KeyValue = struct {
+            key: Key,
+            value: Value,
+        };
+
         // The abstraction for the comptime-selected probing strategy.
         const Probe = switch (options.probing_strategy) {
             .linear => LinearProbe,
             .triangular => TriangularProbe,
             .cache_line => CacheLineProbe,
-        };
-
-        const KeyValue = struct {
-            key: Key,
-            value: Value,
         };
 
         const load_factor_nths = nths(options.max_load_percentage);
@@ -487,6 +490,7 @@ pub fn HashMapContext(
             1,
         );
 
+        /// The alignment of a block of metadata.
         const block_align = @alignOf(Metadata.Block);
         const key_align = @alignOf(Key);
         const value_align = @alignOf(Value);
@@ -1061,6 +1065,8 @@ pub fn HashMapContext(
 
         pub const removeFetch = if (is_zst_ctx) zst_ctx.removeFetch else {};
 
+        /// Returns the true if the metadata at the given entry index can be reset to
+        /// empty without breaking any other probing sequence.
         fn isLastInSequence(self: *const Self, entry_idx: usize) bool {
             const idx_before = if (comptime options.probing_strategy == .cache_line)
                 CacheLineProbe.start(entry_idx).prev(self.entry_mask)
@@ -1071,6 +1077,7 @@ pub fn HashMapContext(
             return (empty_before + empty_after) < Metadata.Block.len;
         }
 
+        /// Grows the maps backing allocation.
         fn grow(
             self: *Self,
             allocator: Allocator,
@@ -1182,6 +1189,7 @@ pub fn HashMapContext(
             blocks[blocks.len - 1] = blocks[0];
         }
 
+        /// Inserts all entries from `other` in a single operation.
         fn batchInsert(self: *Self, other: *const Self, ctx: Context) void {
             const other_blocks = other.getConstMetadataBlocks();
             for (other_blocks[0 .. other_blocks.len - 1], 0..) |block, v| {
@@ -1219,6 +1227,8 @@ pub fn HashMapContext(
             self.metadata[entry_idx] = metadata;
         }
 
+        /// Probes for the index at which a key is either already present
+        /// or would be inserted.
         fn probeGetOrInsertIdx(
             self: *const Self,
             probe: *Probe,
@@ -1757,6 +1767,7 @@ pub fn HashMapContext(
 const Metadata = packed struct(u8) {
     const HashHint = HashHintInt(u8);
 
+    /// A SIMD vector containing multiple metadata slots.
     const Block = extern struct {
         const len = blockLen(builtin.cpu);
         const mask = len - 1;
