@@ -26,6 +26,8 @@ pub const List = extern struct {
 
             ptr: ItemPointer,
 
+            /// Returns the next link in the iterator's sequence without
+            /// advancing it.
             pub fn peekNext(self: *const @This()) ?Item {
                 return self.ptr.*;
             }
@@ -241,8 +243,8 @@ pub const Queue = extern struct {
     /// The link type for connecting queue items.
     pub const Link = double.Link;
 
-    pub const ConstForwardIterator = GenericIterator(.forward, true);
-    pub const ForwardIterator = GenericIterator(.forward, false);
+    pub const ConstIterator = GenericIterator(.forward, true);
+    pub const Iterator = GenericIterator(.forward, false);
     pub const ConstReverseIterator = GenericIterator(.reverse, true);
     pub const ReverseIterator = GenericIterator(.reverse, false);
 
@@ -257,10 +259,12 @@ pub const Queue = extern struct {
 
             link: ?Item,
 
+            /// Returns the next link without advancing the iterator.
             pub fn peekNext(self: *const @This()) ?Item {
                 return self.link;
             }
 
+            /// Returns
             pub fn next(self: *@This()) ?Item {
                 const link = self.peekNext() orelse return null;
                 self.link = if (comptime direction == .forward) link.next else getLink(link.prev);
@@ -338,20 +342,22 @@ pub const Queue = extern struct {
         return Mixin(Self).getConst(self, idx);
     }
 
-    /// Returns an iterator over the items in the list.
-    pub fn iter(self: *Self) ForwardIterator {
+    /// Returns an iterator over the queue's links.
+    pub fn iter(self: *Self) Iterator {
         return .{ .link = self.head };
     }
 
-    /// Returns a const iterator over the items in the list.
-    pub fn constIter(self: *const Self) ConstForwardIterator {
+    /// Returns a const iterator over the queue's links.
+    pub fn constIter(self: *const Self) ConstIterator {
         return .{ .link = self.head };
     }
 
+    /// Returns a reverse iterator over the queue's links.
     pub fn reverseIter(self: *Self) ReverseIterator {
         return .{ .link = getLink(self.tail) };
     }
 
+    /// Returns a const reverse iterator over the queue's links.
     pub fn constReverseIter(self: *const Self) ConstReverseIterator {
         return .{ .link = getLink(self.tail) };
     }
@@ -524,6 +530,7 @@ pub const Cursor = struct {
     queue: *Queue,
     ptr: *?*Link,
 
+    /// Returns the next link in the iterator's sequence without advancing it.
     pub fn peekNext(self: *Cursor) ?*Link {
         return self.ptr.* orelse return null;
     }

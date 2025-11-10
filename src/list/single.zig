@@ -88,6 +88,17 @@ pub const List = struct {
         return Mixin(Self).get(self, idx);
     }
 
+    test get {
+        var list: List = .empty;
+        var links: [2]List.Link = undefined;
+
+        list.insertHead(&links[1]);
+        list.insertHead(&links[0]);
+
+        for (&links, 0..) |*link, i|
+            try testing.expectEqual(link, list.get(i));
+    }
+
     /// Returns the link at the given index.
     ///
     /// This operation has O(n) complexity in the worst case.
@@ -95,7 +106,7 @@ pub const List = struct {
         return Mixin(Self).getConst(self, idx);
     }
 
-    /// Returns an iterator over the items in the list.
+    /// Returns an iterator over list's links.
     pub fn iter(self: *Self) Iterator {
         return Mixin(Self).iter(self);
     }
@@ -116,7 +127,7 @@ pub const List = struct {
         }
     }
 
-    /// Returns a const iterator over the items in the list.
+    /// Returns a const iterator over list's links.
     pub fn constIter(self: *const Self) ConstIterator {
         return Mixin(Self).constIter(self);
     }
@@ -358,12 +369,12 @@ pub const Queue = struct {
         return Mixin(Self).getConst(self, idx);
     }
 
-    /// Returns an iterator over the items in the list.
+    /// Returns an iterator over the list's links.
     pub fn iter(self: *Self) Iterator {
         return Mixin(Self).iter(self);
     }
 
-    /// Returns a const iterator over the items in the list.
+    /// Returns a const iterator over the list's links.
     pub fn constIter(self: *const Self) ConstIterator {
         return Mixin(Self).constIter(self);
     }
@@ -528,8 +539,8 @@ fn GenericIterator(comptime is_const: bool) type {
         /// The pointer to the next item in the iterator sequence.
         link: ?Item,
 
-        /// Returns the next item in the iterator sequence without advancing
-        /// the iterator.
+        /// Returns the next link in the iterator's sequence without advancing
+        /// it.
         pub fn peekNext(self: *const Self) ?Item {
             return self.link;
         }
