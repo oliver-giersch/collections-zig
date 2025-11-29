@@ -343,8 +343,13 @@ pub const Queue = extern struct {
         comptime is_const: bool,
     ) type {
         return struct {
+            /// The type of link pointer returned by the iterator.
             pub const Item = if (is_const) *const Self.Link else *Self.Link;
 
+            /// True if iterating in forward direction.
+            pub const is_forward = direction == .forward;
+
+            /// The pointer to the current link.
             link: ?Item,
 
             /// Returns the next link without advancing the iterator.
@@ -355,7 +360,10 @@ pub const Queue = extern struct {
             /// Returns the next link and advances the iterator.
             pub fn next(self: *@This()) ?Item {
                 const link = self.peekNext() orelse return null;
-                self.link = if (comptime direction == .forward) link.next else getLink(link.prev);
+                self.link = if (comptime direction == .forward)
+                    link.next
+                else
+                    getLink(link.prev);
                 return link;
             }
         };
@@ -400,6 +408,7 @@ pub const Queue = extern struct {
     test contains {
         var queue: Queue = undefined;
         var links: [2]Queue.Link = undefined;
+        queue.empty();
 
         queue.insertTail(&links[0]);
         queue.insertTail(&links[1]);
@@ -420,6 +429,7 @@ pub const Queue = extern struct {
     test len {
         var queue: Queue = undefined;
         var links: [2]Queue.Link = undefined;
+        queue.empty();
 
         queue.insertTail(&links[0]);
         queue.insertTail(&links[1]);

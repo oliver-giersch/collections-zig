@@ -307,6 +307,7 @@ pub const Queue = struct {
     test isEmpty {
         var queue: Queue = undefined;
         queue.empty();
+
         try testing.expect(queue.isEmpty());
     }
 
@@ -319,6 +320,7 @@ pub const Queue = struct {
 
     test contains {
         var queue: Queue = undefined;
+        queue.empty();
         var links: [2]Queue.Link = undefined;
 
         queue.insertTail(&links[0]);
@@ -339,6 +341,7 @@ pub const Queue = struct {
 
     test len {
         var queue: Queue = undefined;
+        queue.empty();
         var links: [2]Queue.Link = undefined;
 
         queue.insertTail(&links[0]);
@@ -355,8 +358,8 @@ pub const Queue = struct {
 
     test get {
         var queue: Queue = undefined;
-        var links: [2]Queue.Link = undefined;
         queue.empty();
+        var links: [2]Queue.Link = undefined;
 
         queue.insertTail(&links[0]);
         queue.insertTail(&links[1]);
@@ -612,7 +615,7 @@ fn Mixin(comptime Self: type) type {
             while (prev.*) |curr| {
                 if (curr == link)
                     return prev;
-                prev = &link.next;
+                prev = &curr.next;
             }
 
             unreachable;
