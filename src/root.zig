@@ -6,10 +6,13 @@ const assert = std.debug.assert;
 const array_list = @import("array_list.zig");
 const hash_map = @import("hash_map.zig");
 const single = @import("list/single.zig");
+const double = @import("list/double.zig");
 
 comptime {
     _ = array_list;
     _ = hash_map;
+    _ = single;
+    _ = double;
 }
 
 const Log2Int = std.math.Log2Int(usize);
@@ -25,6 +28,8 @@ pub const ArrayListAligned = array_list.ArrayListAligned;
 
 pub const SList = single.List;
 pub const SQueue = single.Queue;
+pub const DList = double.List;
+pub const DQueue = double.Queue;
 
 pub const OOM = std.mem.Allocator.Error;
 pub const oom: OOM = error.OutOfMemory;

@@ -222,6 +222,8 @@ pub const List = struct {
 
     /// Removes and returns the link after the given link.
     ///
+    /// Asserts that the list contains the predecessor link.
+    ///
     /// This operation has O(1) complexity.
     pub fn removeAfter(self: *Self, after: *Self.Link) ?*Self.Link {
         assert(self.contains(after));
@@ -379,7 +381,9 @@ pub const Queue = struct {
         return Mixin(Self).constIter(self);
     }
 
-    /// Appends the given list to this list's tail.
+    /// Appends the given queue to this queue's tail.
+    ///
+    /// This operation has O(1) complexity.
     pub fn concat(self: *Self, other: *const Self) void {
         if (other.isEmpty()) {
             @branchHint(.unlikely);

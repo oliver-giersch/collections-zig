@@ -4,6 +4,18 @@ const std = @import("std");
 const assert = std.debug.assert;
 
 /// An intrusive, double-linked list.
+///
+/// This type of list requires the most memory but in return supports efficient
+/// insertion and removal at arbitrary list positions (except for tail
+/// insertions) as well as iteration in both forward and reverse direction.
+///
+/// All insertion methods assume uninitialized link arguments and will fully
+/// initialize any link that is inserted.
+/// All removal methods must be assumed to uninitialize the contents of the
+/// removed links but not the containing structures.
+///
+/// The user is entirely responsible for managing the lifetime of list links.
+/// Each link must live for at least as long as it is part of the list.
 pub const List = extern struct {
     const Self = @This();
 
@@ -32,6 +44,7 @@ pub const List = extern struct {
                 return self.ptr.*;
             }
 
+            /// Returns the next link and advances the iterator.
             pub fn next(self: *@This()) ?Item {
                 const link = self.peekNext() orelse return null;
                 self.ptr = &link.next;
@@ -64,11 +77,26 @@ pub const List = extern struct {
         return Mixin(Self).isEmpty(self);
     }
 
+    test isEmpty {
+        var list: List = .empty;
+        try testing.expect(list.isEmpty());
+    }
+
     /// Returns true if the queue contains the given link.
     ///
     /// This operation has O(n) complexity in the worst case.
     pub fn contains(self: *const Self, link: *const Self.Link) bool {
         return Mixin(Self).contains(self, link);
+    }
+
+    test contains {
+        var list: List = .empty;
+        var links: [2]List.Link = undefined;
+
+        list.insertHead(&links[1]);
+        list.insertHead(&links[0]);
+        try testing.expect(list.contains(&links[0]));
+        try testing.expect(list.contains(&links[1]));
     }
 
     /// Returns the list's length.
@@ -81,11 +109,31 @@ pub const List = extern struct {
         return Mixin(Self).len(self);
     }
 
+    test len {
+        var list: List = .empty;
+        var links: [2]List.Link = undefined;
+
+        list.insertHead(&links[1]);
+        list.insertHead(&links[0]);
+        try testing.expectEqual(2, list.len());
+    }
+
     /// Returns the link at the given index.
     ///
     /// This operation has O(n) complexity in the worst case.
     pub fn get(self: *Self, idx: usize) ?*Self.Link {
         return Mixin(Self).get(self, idx);
+    }
+
+    test get {
+        var list: List = .empty;
+        var links: [2]List.Link = undefined;
+
+        list.insertHead(&links[1]);
+        list.insertHead(&links[0]);
+
+        for (&links, 0..) |*link, i|
+            try testing.expectEqual(link, list.get(i));
     }
 
     /// Returns the link at the given index.
@@ -142,6 +190,12 @@ pub const List = extern struct {
         }
     }
 
+    /// Inserts the given link before the given successor link.
+    ///
+    /// Asserts that the list contains the successor but not the link itself.
+    /// The given link may be uninitialized.
+    ///
+    /// This operation has O(1) complexity.
     pub fn insertBefore(self: *Self, before: *Self.Link, link: *Self.Link) void {
         assert(self.contains(before));
         assert(!self.contains(link));
@@ -181,6 +235,8 @@ pub const List = extern struct {
 
     /// Removes and returns the link after the given link.
     ///
+    /// Asserts that the list contains the predecessor link.
+    ///
     /// This operation has O(1) complexity.
     pub fn removeAfter(self: *Self, after: *Self.Link) ?*Self.Link {
         assert(self.contains(after));
@@ -204,6 +260,29 @@ pub const List = extern struct {
         list.insertHead(&links[0]);
 
         try testing.expectEqual(&links[1], list.removeAfter(&links[0]));
+    }
+
+    pub fn removeBefore(self: *Self, before: *Self.Link) ?*Self.Link {
+        assert(self.contains(before));
+
+        const link = self.getLink(before.prev) orelse return null;
+        link.prev.* = before;
+        before.prev = link.prev;
+
+        link.* = undefined;
+        return link;
+    }
+
+    test removeBefore {
+        var list: List = .empty;
+        var links: [2]List.Link = undefined;
+
+        list.insertHead(&links[1]);
+        list.insertHead(&links[0]);
+
+        try testing.expectEqual(&links[0], list.removeBefore(&links[1]));
+        try testing.expect(!list.contains(&links[0]));
+        try testing.expectEqual(list.len(), 2);
     }
 
     /// Removes the given link from the queue.
@@ -233,6 +312,15 @@ pub const List = extern struct {
         list.remove(&links[0]);
         try testing.expect(!list.contains(&links[0]));
         try testing.expect(list.contains(&links[1]));
+    }
+
+    fn getLink(self: *Self, prev: *?*Self.Link) ?*Self.Link {
+        if (prev == &self.head) {
+            @branchHint(.unlikely);
+            return null;
+        }
+
+        return @fieldParentPtr("next", prev);
     }
 };
 
@@ -264,7 +352,7 @@ pub const Queue = extern struct {
                 return self.link;
             }
 
-            /// Returns
+            /// Returns the next link and advances the iterator.
             pub fn next(self: *@This()) ?Item {
                 const link = self.peekNext() orelse return null;
                 self.link = if (comptime direction == .forward) link.next else getLink(link.prev);
@@ -309,10 +397,20 @@ pub const Queue = extern struct {
         return Mixin(Self).contains(self, link);
     }
 
+    test contains {
+        var queue: Queue = undefined;
+        var links: [2]Queue.Link = undefined;
+
+        queue.insertTail(&links[0]);
+        queue.insertTail(&links[1]);
+        try testing.expect(queue.contains(&links[0]));
+        try testing.expect(queue.contains(&links[1]));
+    }
+
     /// Returns the queue's length.
     ///
-    /// Consider storing and maintaining the length separately, if it is
-    /// needed frequently.
+    /// Consider storing and maintaining the length separately,
+    /// if it is needed frequently.
     ///
     /// This operation has O(n) complexity.
     pub fn len(self: *const Self) usize {
@@ -335,11 +433,33 @@ pub const Queue = extern struct {
         return Mixin(Self).get(self, idx);
     }
 
+    test get {
+        var queue: Queue = undefined;
+        var links: [2]Queue.Link = undefined;
+        queue.empty();
+
+        queue.insertTail(&links[0]);
+        queue.insertTail(&links[1]);
+        try testing.expectEqual(&links[0], queue.get(0));
+        try testing.expectEqual(&links[1], queue.get(1));
+    }
+
     /// Returns the link at the given index.
     ///
     /// This operation has O(n) complexity in the worst case.
     pub fn getConst(self: *const Self, idx: usize) ?*const Self.Link {
         return Mixin(Self).getConst(self, idx);
+    }
+
+    test getConst {
+        var queue: Queue = undefined;
+        var links: [2]Queue.Link = undefined;
+        queue.empty();
+
+        queue.insertTail(&links[0]);
+        queue.insertTail(&links[1]);
+        try testing.expectEqual(&links[0], queue.getConst(0));
+        try testing.expectEqual(&links[1], queue.getConst(1));
     }
 
     /// Returns an iterator over the queue's links.
@@ -362,11 +482,12 @@ pub const Queue = extern struct {
         return .{ .link = getLink(self.tail) };
     }
 
+    /// Returns a cursor for the queue.
     pub fn cursor(self: *Self) Self.Cursor {
         return .{ .ptr = &self.head, .queue = self };
     }
 
-    /// Appends the given list to this list's tail.
+    /// Appends the given queue to this queue's tail.
     ///
     /// This operation has O(1) complexity.
     pub fn concat(self: *Self, other: *const Self) void {
@@ -378,6 +499,24 @@ pub const Queue = extern struct {
         self.tail.* = other.head;
         other_head.prev = self.tail;
         self.tail = other.tail;
+    }
+
+    test concat {
+        var queue1: Queue = undefined;
+        queue1.empty();
+        var queue2: Queue = undefined;
+        queue2.empty();
+        var links: [4]Queue.Link = undefined;
+
+        queue1.insertTail(&links[0]);
+        queue1.insertTail(&links[1]);
+        queue2.insertTail(&links[2]);
+        queue2.insertTail(&links[3]);
+
+        queue1.concat(&queue2);
+        for (&links, 0..) |*link, i| {
+            try testing.expectEqual(link, queue1.get(i));
+        }
     }
 
     /// Inserts the given link at the list's head.
@@ -427,6 +566,12 @@ pub const Queue = extern struct {
         }
     }
 
+    /// Inserts the given link before the given successor link.
+    ///
+    /// Asserts that the queue contains the successor but not the link itself.
+    /// The given link may be uninitialized.
+    ///
+    /// This operation has O(1) complexity.
     pub fn insertBefore(self: *Self, before: *Self.Link, link: *Self.Link) void {
         assert(self.contains(before));
         assert(!self.contains(link));
@@ -526,6 +671,8 @@ pub const Queue = extern struct {
     }
 };
 
+/// A double-linked queue cursor that can be moved in both forward and reverse
+/// directions and permits before/after link insertion and removal.
 pub const Cursor = struct {
     queue: *Queue,
     ptr: *?*Link,
