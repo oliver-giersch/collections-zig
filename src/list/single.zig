@@ -106,6 +106,18 @@ pub const List = struct {
         return Mixin(Self).getConst(self, idx);
     }
 
+    test getConst {
+        var list: List = .empty;
+        var links: [2]List.Link = undefined;
+
+        list.insertHead(&links[1]);
+        list.insertHead(&links[0]);
+
+        const cref: *const List = &list;
+        for (&links, 0..) |*link, i|
+            try testing.expectEqual(link, cref.getConst(i));
+    }
+
     /// Returns an iterator over list's links.
     pub fn iter(self: *Self) Iterator {
         return Mixin(Self).iter(self);
@@ -119,12 +131,9 @@ pub const List = struct {
         list.insertHead(&links[0]);
 
         var it = list.iter();
-        var i: usize = 0;
-
-        while (it.next()) |link| {
-            try testing.expectEqual(&links[i], link);
-            i += 1;
-        }
+        for (&links) |*link|
+            try testing.expectEqual(link, it.next());
+        try testing.expectEqual(null, it.next());
     }
 
     /// Returns a const iterator over list's links.
@@ -139,13 +148,11 @@ pub const List = struct {
         list.insertHead(&links[1]);
         list.insertHead(&links[0]);
 
-        var it = list.constIter();
-        var i: usize = 0;
-
-        while (it.next()) |link| {
-            try testing.expectEqual(&links[i], link);
-            i += 1;
-        }
+        const cref: *const List = &list;
+        var it = cref.constIter();
+        for (&links) |*link|
+            try testing.expectEqual(link, it.next());
+        try testing.expectEqual(null, it.next());
     }
 
     /// Inserts the given link at the list's head.
@@ -374,14 +381,56 @@ pub const Queue = struct {
         return Mixin(Self).getConst(self, idx);
     }
 
+    test getConst {
+        var queue: Queue = undefined;
+        queue.empty();
+        var links: [2]Queue.Link = undefined;
+
+        queue.insertTail(&links[0]);
+        queue.insertTail(&links[1]);
+
+        const cref: *const Queue = &queue;
+        try testing.expectEqual(&links[0], cref.getConst(0));
+        try testing.expectEqual(&links[1], cref.getConst(1));
+    }
+
     /// Returns an iterator over the list's links.
     pub fn iter(self: *Self) Iterator {
         return Mixin(Self).iter(self);
     }
 
+    test iter {
+        var queue: Queue = undefined;
+        queue.empty();
+        var links: [2]Queue.Link = undefined;
+
+        queue.insertTail(&links[0]);
+        queue.insertTail(&links[1]);
+
+        var it = queue.iter();
+        for (&links) |*link|
+            try testing.expectEqual(link, it.next());
+        try testing.expectEqual(null, it.next());
+    }
+
     /// Returns a const iterator over the list's links.
     pub fn constIter(self: *const Self) ConstIterator {
         return Mixin(Self).constIter(self);
+    }
+
+    test constIter {
+        var queue: Queue = undefined;
+        queue.empty();
+        var links: [2]List.Link = undefined;
+
+        queue.insertTail(&links[0]);
+        queue.insertTail(&links[1]);
+
+        const cref: *const Queue = &queue;
+        var it = cref.constIter();
+        for (&links) |*link|
+            try testing.expectEqual(link, it.next());
+        try testing.expectEqual(null, it.next());
     }
 
     /// Appends the given queue to this queue's tail.
@@ -487,6 +536,8 @@ pub const Queue = struct {
     }
 
     /// Removes and returns the link after the given link.
+    ///
+    /// Asserts that the list contains the predecessor link.
     ///
     /// This operation has O(1) complexity.
     pub fn removeAfter(self: *Self, after: *Self.Link) ?*Self.Link {

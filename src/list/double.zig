@@ -148,9 +148,36 @@ pub const List = extern struct {
         return .{ .ptr = &self.head };
     }
 
+    test iter {
+        var list: List = .empty;
+        var links: [2]List.Link = undefined;
+
+        list.insertHead(&links[1]);
+        list.insertHead(&links[0]);
+
+        var it = list.iter();
+        for (&links) |*link|
+            try testing.expectEqual(link, it.next());
+        try testing.expectEqual(null, it.next());
+    }
+
     /// Returns a const iterator over the items in the list.
     pub fn constIter(self: *const Self) ConstIterator {
         return .{ .ptr = &self.head };
+    }
+
+    test constIter {
+        var list: List = .empty;
+        var links: [2]List.Link = undefined;
+
+        list.insertHead(&links[1]);
+        list.insertHead(&links[0]);
+
+        const cref: *const List = &list;
+        var it = cref.constIter();
+        for (&links) |*link|
+            try testing.expectEqual(link, it.next());
+        try testing.expectEqual(null, it.next());
     }
 
     /// Inserts the given link at the list's head.
@@ -262,6 +289,11 @@ pub const List = extern struct {
         try testing.expectEqual(&links[1], list.removeAfter(&links[0]));
     }
 
+    /// Removes and returns the link before the given link.
+    ///
+    /// Asserts that the list contains the sucessor link.
+    ///
+    /// This operation has O(1) complexity.
     pub fn removeBefore(self: *Self, before: *Self.Link) ?*Self.Link {
         assert(self.contains(before));
 
@@ -282,7 +314,7 @@ pub const List = extern struct {
 
         try testing.expectEqual(&links[0], list.removeBefore(&links[1]));
         try testing.expect(!list.contains(&links[0]));
-        try testing.expectEqual(list.len(), 2);
+        try testing.expect(list.contains(&links[1]));
     }
 
     /// Removes the given link from the queue.
@@ -331,9 +363,13 @@ pub const Queue = extern struct {
     /// The link type for connecting queue items.
     pub const Link = double.Link;
 
+    /// A forward const iterator over all links in the list.
     pub const ConstIterator = GenericIterator(.forward, true);
+    /// A forward iterator over all links in the list.
     pub const Iterator = GenericIterator(.forward, false);
+    /// A reverse const iterator over all links in the list.
     pub const ConstReverseIterator = GenericIterator(.reverse, true);
+    /// A reverse iterator over all links in the list.
     pub const ReverseIterator = GenericIterator(.reverse, false);
 
     pub const Cursor = double.Cursor;
@@ -468,8 +504,9 @@ pub const Queue = extern struct {
 
         queue.insertTail(&links[0]);
         queue.insertTail(&links[1]);
-        try testing.expectEqual(&links[0], queue.getConst(0));
-        try testing.expectEqual(&links[1], queue.getConst(1));
+        const cref: *const Queue = &queue;
+        try testing.expectEqual(&links[0], cref.getConst(0));
+        try testing.expectEqual(&links[1], cref.getConst(1));
     }
 
     /// Returns an iterator over the queue's links.
@@ -477,14 +514,60 @@ pub const Queue = extern struct {
         return .{ .link = self.head };
     }
 
+    test iter {
+        var queue: Queue = undefined;
+        queue.empty();
+        var links: [2]List.Link = undefined;
+
+        queue.insertTail(&links[0]);
+        queue.insertTail(&links[1]);
+
+        var it = queue.iter();
+        for (&links) |*link|
+            try testing.expectEqual(link, it.next());
+        try testing.expectEqual(null, it.next());
+    }
+
     /// Returns a const iterator over the queue's links.
     pub fn constIter(self: *const Self) ConstIterator {
         return .{ .link = self.head };
     }
 
+    test constIter {
+        var queue: Queue = undefined;
+        queue.empty();
+        var links: [2]List.Link = undefined;
+
+        queue.insertTail(&links[0]);
+        queue.insertTail(&links[1]);
+
+        const cref: *const Queue = &queue;
+        var it = cref.constIter();
+        for (&links) |*link|
+            try testing.expectEqual(link, it.next());
+        try testing.expectEqual(null, it.next());
+    }
+
     /// Returns a reverse iterator over the queue's links.
     pub fn reverseIter(self: *Self) ReverseIterator {
         return .{ .link = getLink(self.tail) };
+    }
+
+    test reverseIter {
+        var queue: Queue = undefined;
+        queue.empty();
+        var links: [4]Queue.Link = undefined;
+
+        queue.insertTail(&links[0]);
+        queue.insertTail(&links[1]);
+        queue.insertTail(&links[2]);
+        queue.insertTail(&links[3]);
+
+        var i: usize = 4;
+        var it = queue.reverseIter();
+        while (i > 0) : (i -= 1)
+            try testing.expectEqual(&links[i - 1], it.next());
+        try testing.expectEqual(null, it.next());
     }
 
     /// Returns a const reverse iterator over the queue's links.
@@ -529,7 +612,7 @@ pub const Queue = extern struct {
         }
     }
 
-    /// Inserts the given link at the list's head.
+    /// Inserts the given link at the queue's head.
     ///
     /// This operation has O(1) complexity.
     pub fn insertHead(self: *Self, link: *Self.Link) void {
@@ -623,6 +706,8 @@ pub const Queue = extern struct {
 
     /// Removes and returns the link after the given link.
     ///
+    /// Asserts that the list contains the predecessor link.
+    ///
     /// This operation has O(1) complexity.
     pub fn removeAfter(self: *Self, after: *Self.Link) ?*Self.Link {
         assert(self.contains(after));
@@ -640,6 +725,22 @@ pub const Queue = extern struct {
         return link;
     }
 
+    test removeAfter {
+        var queue: Queue = undefined;
+        queue.empty();
+        var links: [4]Queue.Link = undefined;
+
+        for (&links) |*link|
+            queue.insertTail(link);
+        try testing.expectEqual(&links[1], queue.removeAfter(&links[0]));
+        try testing.expectEqual(&links[3], queue.removeAfter(&links[2]));
+    }
+
+    /// Removes and returns the link before the given link.
+    ///
+    /// Asserts that the list contains the sucessor link.
+    ///
+    /// This operation has O(1) complexity.
     pub fn removeBefore(self: *Self, before: *Self.Link) ?*Self.Link {
         assert(self.contains(before));
 
@@ -692,6 +793,7 @@ pub const Cursor = struct {
         return self.ptr.* orelse return null;
     }
 
+    /// Moves the cursor to the next link.
     pub fn moveNext(self: *Cursor) ?*Link {
         const link = self.peekNext() orelse return null;
         self.ptr = &link.next;
@@ -738,6 +840,7 @@ pub const Cursor = struct {
         var cur = queue.cursor();
         try testing.expectEqual(&links[0], cur.moveNext());
         try testing.expectEqual(&links[1], cur.moveNext());
+
         cur.insertNext(&links[2]);
         try testing.expectEqual(&links[2], cur.moveNext());
         try testing.expectEqual(&links[3], cur.moveNext());
@@ -746,6 +849,7 @@ pub const Cursor = struct {
             try testing.expectEqual(link, queue.get(i));
     }
 
+    /// Removes the cursor's successor link.
     pub fn removeNext(self: *Cursor) ?*Link {
         const link = self.peekNext() orelse return null;
         self.ptr.* = link.next;
