@@ -1,11 +1,12 @@
 const min_array_list_capacity = 8;
 const max_array_list_capacity = 1 << (@bitSizeOf(usize) - 1);
 
-/// A growable list of contiguous items in memory.
+/// A resizable list of contiguous items in memory.
 pub fn ArrayList(comptime T: type) type {
     return ArrayListAligned(T, null);
 }
 
+/// A resizable, aligned list of contiguous items in memory.
 pub fn ArrayListAligned(comptime T: type, comptime A: ?Alignment) type {
     if (A) |alignment| {
         if (alignment == Alignment.of(T))
@@ -20,10 +21,13 @@ pub fn ArrayListAligned(comptime T: type, comptime A: ?Alignment) type {
 
         /// The type of item stored in the list.
         pub const Item = Bounded.Item;
+        /// The alignment of the item slice.
         pub const item_alignment = Bounded.item_alignment;
 
+        /// The out-of-memory condition error.
         pub const OOM = collections.OOM;
 
+        /// The bounded array list corresponding to this type.
         pub const Bounded = BoundedArrayListAligned(T, A);
 
         /// The currently allocated (if non-zero capacity) bounded array list.
@@ -52,6 +56,8 @@ pub fn ArrayListAligned(comptime T: type, comptime A: ?Alignment) type {
             return self.bounded.isEmpty();
         }
 
+        /// Returns a deep copy of the list with its own backing bounded array
+        /// list allocation.
         pub fn clone(self: *const Self, allocator: Allocator) OOM!Self {
             if (self.bounded.capacity == 0)
                 return .empty;
@@ -78,7 +84,7 @@ pub fn ArrayListAligned(comptime T: type, comptime A: ?Alignment) type {
             return self.bounded.getConstLast();
         }
 
-        /// Clears the list but keeps any allocated capacity.
+        /// Clears all items from the list, keeping any backing allocation.
         pub fn clear(self: *Self) void {
             self.bounded.clear();
         }
@@ -112,6 +118,15 @@ pub fn ArrayListAligned(comptime T: type, comptime A: ?Alignment) type {
                 try self.reserve(allocator, capacity - self.bounded.capacity);
         }
 
+        /// Reserves an uninitialized slot at the given index and returns a
+        /// pointer to it.
+        /// If there is insufficient capacity, the backing allocation is
+        /// reallocated and grown.
+        ///
+        /// Any initialized items after the given index are shifted forwards.
+        ///
+        /// Asserts that the index is within bounds or at most one after the
+        /// consecutive slice of initialized items.
         pub fn appendAt(self: *Self, allocator: Allocator, idx: usize) OOM!*Item {
             return self.bounded.appendAt(idx) catch blk: {
                 try self.grow(allocator);
@@ -119,10 +134,23 @@ pub fn ArrayListAligned(comptime T: type, comptime A: ?Alignment) type {
             };
         }
 
+        /// Reserves an uninitialized slot at the end of the item slice and
+        /// returns a pointer to it.
+        /// If there is insufficient capacity, the backing allocation is
+        /// reallocated and grown.
         pub fn append(self: *Self, allocator: Allocator) OOM!*Item {
             return self.appendAt(allocator, self.bounded.items.len);
         }
 
+        /// Reserves a number of uninitialized slots at the given index and
+        /// returns the corresponding slice.
+        /// If there is insufficient capacity, the backing allocation is
+        /// reallocated and grown.
+        ///
+        /// Any initialized items after the given index are shifted forwards.
+        ///
+        /// Asserts that the index is within bounds or at most one after the
+        /// consecutive slice of initialized items.
         pub fn appendSliceAt(
             self: *Self,
             allocator: Allocator,
@@ -135,6 +163,10 @@ pub fn ArrayListAligned(comptime T: type, comptime A: ?Alignment) type {
             };
         }
 
+        /// Reserves a number of uninitialized slots at the end of the item
+        /// slice and returns the corresponding slice.
+        /// If there is insufficient capacity, the backing allocation is
+        /// reallocated and grown.
         pub fn appendSlice(
             self: *Self,
             allocator: Allocator,
@@ -143,6 +175,14 @@ pub fn ArrayListAligned(comptime T: type, comptime A: ?Alignment) type {
             return self.appendSliceAt(allocator, len, self.bounded.items.len);
         }
 
+        /// Inserts the given item at the given index.
+        /// If there is insufficient capacity, the backing allocation is
+        /// reallocated and grown.
+        ///
+        /// Any initialized items after the given index are shifted forwards.
+        ///
+        /// Asserts that the index is within bounds or at most one after the
+        /// consecutive slice of initialized items.
         pub fn pushAt(
             self: *Self,
             allocator: Allocator,
@@ -153,6 +193,9 @@ pub fn ArrayListAligned(comptime T: type, comptime A: ?Alignment) type {
             ptr.* = item;
         }
 
+        /// Inserts the given item at the end of the item slice.
+        /// If there is insufficient capacity, the backing allocation is
+        /// reallocated and grown.
         pub fn push(
             self: *Self,
             allocator: Allocator,
@@ -162,6 +205,14 @@ pub fn ArrayListAligned(comptime T: type, comptime A: ?Alignment) type {
             ptr.* = item;
         }
 
+        /// Inserts the given slice at the given index.
+        /// If there is insufficient capacity, the backing allocation is
+        /// reallocated and grown.
+        ///
+        /// Any initialized items after the given index are shifted forwards.
+        ///
+        /// Asserts that the index is within bounds or at most one after the
+        /// consecutive slice of initialized items.
         pub fn pushSliceAt(
             self: *Self,
             allocator: Allocator,
@@ -172,6 +223,9 @@ pub fn ArrayListAligned(comptime T: type, comptime A: ?Alignment) type {
             @memcpy(slice, items);
         }
 
+        /// Inserts the given slice at the end of the item slice.
+        /// If there is insufficient capacity, the backing allocation is
+        /// reallocated and grown.
         pub fn pushSlice(
             self: *Self,
             allocator: Allocator,
@@ -181,14 +235,30 @@ pub fn ArrayListAligned(comptime T: type, comptime A: ?Alignment) type {
             @memcpy(slice, items);
         }
 
+        /// Removes and returns the list's tail item or returns null, if
+        /// the list is empty.
         pub fn pop(self: *Self) ?Item {
             return self.bounded.pop();
         }
 
+        /// Removes and returns the item at the given index.
+        ///
+        /// Any following items are backshifted to fill the hole.
+        ///
+        /// Asserts that the index is within bounds.
         pub fn remove(self: *Self, idx: usize) Item {
             return self.bounded.remove(idx);
         }
 
+        /// Removes and returns the item at the given index.
+        ///
+        /// Instead of shifting all initialized items after the given index
+        /// backwards, only the item and the end of the item slice is moved in
+        /// to fill the hole.
+        /// This is generally more efficient, but destroys any established order
+        /// of items within the item slice.
+        ///
+        /// Asserts that the index is within bounds.
         pub fn swapRemove(self: *Self, idx: usize) Item {
             return self.bounded.swapRemove(idx);
         }
@@ -313,6 +383,7 @@ pub fn BoundedArrayList(comptime T: type) type {
     return BoundedArrayListAligned(T, null);
 }
 
+/// A bounded, aligned list of contiguous items in memory.
 pub fn BoundedArrayListAligned(
     comptime T: type,
     comptime A: ?Alignment,
@@ -336,7 +407,7 @@ pub fn BoundedArrayListAligned(
         else
             @alignOf(Item);
 
-        /// The out-of-memory error.
+        /// The out-of-memory condition error.
         pub const OOM = collections.OOM;
 
         /// The slice of initialized items.
@@ -396,7 +467,7 @@ pub fn BoundedArrayListAligned(
                 &self.items[self.items.len - 1];
         }
 
-        /// Clears all items from the array list.
+        /// Clears all items from the list.
         pub fn clear(self: *Self) void {
             @memset(self.items, undefined);
             self.items.len = 0;
@@ -446,12 +517,11 @@ pub fn BoundedArrayListAligned(
         /// Asserts that the index is within bounds or at most one after the
         /// consecutive slice of initialized items.
         pub fn appendSliceAt(self: *Self, len: usize, idx: usize) OOM![]Item {
-            if (self.items.len + len <= self.capacity) {
-                self.shiftForward(idx, len);
-                return self.items[idx..][0..len];
-            }
+            if (self.items.len + len > self.capacity)
+                return error.OutOfMemory;
 
-            return error.OutOfMemory;
+            self.shiftForward(idx, len);
+            return self.items[idx..][0..len];
         }
 
         /// Reserves a number of uninitialized slots at the end of the item
