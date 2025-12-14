@@ -476,9 +476,7 @@ pub fn BoundedArrayListAligned(
         /// Returns the backing slice containing all items and uninitialized
         /// capacity.
         pub fn backingSlice(self: *Self) []align(item_alignment) Item {
-            var backing = self.items;
-            backing.len = self.capacity;
-            return backing;
+            return self.items.ptr[0..self.capacity];
         }
 
         /// Returns the slice of the uninitialized capacity.
