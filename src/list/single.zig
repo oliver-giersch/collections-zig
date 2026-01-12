@@ -478,6 +478,21 @@ pub const Queue = struct {
         }
     }
 
+    test insertHead {
+        var queue: Queue = undefined;
+        queue.empty();
+        var links: [4]Queue.Link = undefined;
+
+        queue.insertHead(&links[3]);
+        queue.insertHead(&links[2]);
+        queue.insertHead(&links[1]);
+        queue.insertHead(&links[0]);
+
+        try testing.expectEqual(4, queue.len());
+        for (&links, 0..) |*link, i|
+            try testing.expectEqual(link, queue.get(i));
+    }
+
     /// Inserts the given link at the queue's tail.
     ///
     /// This operation has O(1) complexity.
@@ -487,6 +502,19 @@ pub const Queue = struct {
         link.next = null;
         self.tail.* = link;
         self.tail = &link.next;
+    }
+
+    test insertTail {
+        var queue: Queue = undefined;
+        queue.empty();
+        var links: [4]Queue.Link = undefined;
+
+        for (&links) |*link|
+            queue.insertTail(link);
+
+        try testing.expectEqual(4, queue.len());
+        for (&links, 0..) |*link, i|
+            try testing.expectEqual(link, queue.get(i));
     }
 
     /// Inserts the given link after the given predecessor link.
@@ -505,6 +533,21 @@ pub const Queue = struct {
             @branchHint(.unlikely);
             self.tail = &link.next;
         }
+    }
+
+    test insertAfter {
+        var queue: Queue = undefined;
+        queue.empty();
+        var links: [4]Queue.Link = undefined;
+
+        queue.insertHead(&links[0]);
+        queue.insertAfter(&links[0], &links[2]);
+        queue.insertAfter(&links[0], &links[1]);
+        queue.insertAfter(&links[2], &links[3]);
+
+        try testing.expectEqual(4, queue.len());
+        for (&links, 0..) |*link, i|
+            try testing.expectEqual(link, queue.get(i));
     }
 
     /// Removes and returns the queue's head.
@@ -548,6 +591,24 @@ pub const Queue = struct {
 
         link.* = undefined;
         return link;
+    }
+
+    test removeAfter {
+        var queue: Queue = undefined;
+        queue.empty();
+        var links: [4]Queue.Link = undefined;
+
+        for (&links) |*link|
+            queue.insertTail(link);
+
+        try testing.expectEqual(&links[1], queue.removeAfter(&links[0]));
+        try testing.expectEqual(3, queue.len());
+        try testing.expectEqual(&links[2], queue.removeAfter(&links[0]));
+        try testing.expectEqual(2, queue.len());
+        try testing.expectEqual(&links[3], queue.removeAfter(&links[0]));
+        try testing.expectEqual(1, queue.len());
+        try testing.expectEqual(null, queue.removeAfter(&links[0]));
+        try testing.expectEqual(1, queue.len());
     }
 
     /// Removes the given link from the queue.

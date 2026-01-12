@@ -143,6 +143,18 @@ pub const List = extern struct {
         return Mixin(Self).getConst(self, idx);
     }
 
+    test getConst {
+        var list: List = .empty;
+        var links: [2]List.Link = undefined;
+
+        list.insertHead(&links[1]);
+        list.insertHead(&links[0]);
+
+        const cref: *const List = &list;
+        for (&links, 0..) |*link, i|
+            try testing.expectEqual(link, cref.getConst(i));
+    }
+
     /// Returns an iterator over the items in the list.
     pub fn iter(self: *Self) Iterator {
         return .{ .ptr = &self.head };
@@ -504,6 +516,7 @@ pub const Queue = extern struct {
 
         queue.insertTail(&links[0]);
         queue.insertTail(&links[1]);
+
         const cref: *const Queue = &queue;
         try testing.expectEqual(&links[0], cref.getConst(0));
         try testing.expectEqual(&links[1], cref.getConst(1));
@@ -628,6 +641,21 @@ pub const Queue = extern struct {
         }
     }
 
+    test insertHead {
+        var queue: Queue = undefined;
+        queue.empty();
+        var links: [4]Queue.Link = undefined;
+
+        queue.insertHead(&links[3]);
+        queue.insertHead(&links[2]);
+        queue.insertHead(&links[1]);
+        queue.insertHead(&links[0]);
+
+        try testing.expectEqual(4, queue.len());
+        for (&links, 0..) |*link, i|
+            try testing.expectEqual(link, queue.get(i));
+    }
+
     /// Inserts the given link at the queue's tail.
     ///
     /// This operation has O(1) complexity.
@@ -638,6 +666,19 @@ pub const Queue = extern struct {
         link.prev = self.tail;
         self.tail.* = link;
         self.tail = &link.next;
+    }
+
+    test insertTail {
+        var queue: Queue = undefined;
+        queue.empty();
+        var links: [4]Queue.Link = undefined;
+
+        for (&links) |*link|
+            queue.insertTail(link);
+
+        try testing.expectEqual(4, queue.len());
+        for (&links, 0..) |*link, i|
+            try testing.expectEqual(link, queue.get(i));
     }
 
     /// Inserts the given link after the given predecessor link.
@@ -659,6 +700,21 @@ pub const Queue = extern struct {
         }
     }
 
+    test insertAfter {
+        var queue: Queue = undefined;
+        queue.empty();
+        var links: [4]Queue.Link = undefined;
+
+        queue.insertHead(&links[0]);
+        queue.insertAfter(&links[0], &links[2]);
+        queue.insertAfter(&links[0], &links[1]);
+        queue.insertAfter(&links[2], &links[3]);
+
+        try testing.expectEqual(4, queue.len());
+        for (&links, 0..) |*link, i|
+            try testing.expectEqual(link, queue.get(i));
+    }
+
     /// Inserts the given link before the given successor link.
     ///
     /// Asserts that the queue contains the successor but not the link itself.
@@ -673,6 +729,21 @@ pub const Queue = extern struct {
         link.prev = before.prev;
         before.prev.* = link;
         before.prev = &link.next;
+    }
+
+    test insertBefore {
+        var queue: Queue = undefined;
+        queue.empty();
+        var links: [4]Queue.Link = undefined;
+
+        queue.insertTail(&links[3]);
+        queue.insertBefore(&links[3], &links[2]);
+        queue.insertBefore(&links[2], &links[1]);
+        queue.insertBefore(&links[1], &links[0]);
+
+        try testing.expectEqual(4, queue.len());
+        for (&links, 0..) |*link, i|
+            try testing.expectEqual(link, queue.get(i));
     }
 
     /// Removes and returns the queue's head.

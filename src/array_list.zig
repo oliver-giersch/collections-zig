@@ -485,6 +485,24 @@ pub fn BoundedArrayListAligned(
             return slice[self.items.len..];
         }
 
+        test undefinedSlice {
+            var items: [4]i32 = undefined;
+            var list: BoundedArrayList(i32) = .init(&items);
+
+            const slice: []i32 = &items;
+            var undefined_slice = list.undefinedSlice();
+
+            try testing.expectEqual(slice.ptr, undefined_slice.ptr);
+            try testing.expectEqual(slice.len, undefined_slice.len);
+
+            try list.push(0);
+            undefined_slice = list.undefinedSlice();
+
+            const ptr: [*]i32 = @ptrCast(&items[1]);
+            try testing.expectEqual(ptr, undefined_slice.ptr);
+            try testing.expectEqual(3, undefined_slice.len);
+        }
+
         /// Reserves an uninitialized slot at the given index and returns a
         /// pointer to it.
         ///
@@ -505,6 +523,23 @@ pub fn BoundedArrayListAligned(
         /// returns a pointer to it.
         pub fn append(self: *Self) OOM!*Item {
             return self.appendAt(self.items.len);
+        }
+
+        test append {
+            var items: [4]i32 = undefined;
+            var list: BoundedArrayList(i32) = .init(&items);
+
+            var ptr = try list.append();
+            ptr.* = 0;
+            ptr = try list.append();
+            ptr.* = 1;
+            ptr = try list.append();
+            ptr.* = 2;
+            ptr = try list.append();
+            ptr.* = 3;
+
+            try testing.expectError(error.OutOfMemory, list.append());
+            try testing.expectEqualSlices(i32, &.{ 0, 1, 2, 3 }, list.items);
         }
 
         /// Reserves a number of uninitialized slots at the given index and
@@ -556,10 +591,30 @@ pub fn BoundedArrayListAligned(
             @memcpy(slice, items);
         }
 
+        test pushSliceAt {
+            var items: [4]i32 = undefined;
+            var list: BoundedArrayList(i32) = .init(&items);
+
+            try list.pushSlice(&.{ 0, 0 });
+            try tt.expectEqualSlices(i32, &.{ 0, 0 }, list.items);
+            try list.pushSliceAt(1, &.{ 1, 1 });
+            try tt.expectEqualSlices(i32, &.{ 0, 1, 1, 0 }, list.items);
+        }
+
         /// Inserts the given slice at the end of the item slice.
         pub fn pushSlice(self: *Self, items: []const Item) OOM!void {
             const slice = try self.appendSlice(items.len);
             @memcpy(slice, items);
+        }
+
+        test pushSlice {
+            var items: [4]i32 = undefined;
+            var list: BoundedArrayList(i32) = .init(&items);
+
+            try list.pushSlice(&.{ 0, 1 });
+            try tt.expectEqualSlices(i32, &.{ 0, 1 }, list.items);
+            try list.pushSlice(&.{ 2, 3 });
+            try tt.expectEqualSlices(i32, &.{ 0, 1, 2, 3 }, list.items);
         }
 
         /// Removes and returns the list's tail item or returns null, if
@@ -628,6 +683,7 @@ pub fn BoundedArrayListAligned(
 
 const std = @import("std");
 const tt = std.testing;
+const testing = std.testing;
 const assert = std.debug.assert;
 
 const Alignment = std.mem.Alignment;
