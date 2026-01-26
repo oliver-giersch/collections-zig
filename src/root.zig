@@ -31,6 +31,10 @@ pub const SQueue = single.Queue;
 pub const DList = double.List;
 pub const DQueue = double.Queue;
 
+pub const list = struct {
+    pub const Single = SList;
+};
+
 pub const OOM = std.mem.Allocator.Error;
 pub const oom: OOM = error.OutOfMemory;
 
