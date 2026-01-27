@@ -204,6 +204,7 @@ pub const List = extern struct {
         link.next = self.head;
         link.prev = &self.head;
         self.head = link;
+
         if (link.next) |old_head| {
             @branchHint(.likely);
             old_head.prev = &link.next;
@@ -266,17 +267,7 @@ pub const List = extern struct {
     ///
     /// This operation has O(1) complexity.
     pub fn replace(self: *Self, old: *Self.Link, new: *Self.Link) void {
-        assert(self.contains(old));
-        assert(!self.contains(new));
-
-        new.* = old.*;
-        new.prev.* = new.next;
-        if (new.next) |next| {
-            @branchHint(.likely);
-            next.prev = &new.next;
-        }
-
-        old.* = undefined;
+        return Mixin(Self).replace(self, old, new);
     }
 
     test replace {
@@ -534,6 +525,47 @@ pub const Queue = extern struct {
         try testing.expectEqual(2, queue.len());
     }
 
+    /// Returns a pointer to the first link the queue.
+    pub fn first(self: *Self) ?*Self.Link {
+        return self.head;
+    }
+
+    pub fn firstConst(self: *const Self) ?*const Self.Link {
+        return self.head;
+    }
+
+    /// Returns a pointer to the last link in the queue.
+    pub fn last(self: *Self) ?*Self.Link {
+        return getLink(self.tail);
+    }
+
+    test last {
+        var queue: Queue = undefined;
+        var links: [4]Queue.Link = undefined;
+        queue.empty();
+
+        for (&links) |*link|
+            queue.insertTail(link);
+
+        try testing.expectEqual(&links[3], queue.last());
+    }
+
+    pub fn lastConst(self: *const Self) ?*const Self.Link {
+        return getLink(self.tail);
+    }
+
+    test lastConst {
+        var queue: Queue = undefined;
+        var links: [4]Queue.Link = undefined;
+        queue.empty();
+
+        for (&links) |*link|
+            queue.insertTail(link);
+
+        const cref: *const Queue = &queue;
+        try testing.expectEqual(&links[3], cref.lastConst());
+    }
+
     /// Returns the link at the given index.
     ///
     /// This operation has O(n) complexity in the worst case.
@@ -682,7 +714,9 @@ pub const Queue = extern struct {
         assert(!self.contains(link));
 
         link.next = self.head;
+        link.prev = &self.head;
         self.head = link;
+
         if (link.next) |next| {
             @branchHint(.likely);
             next.prev = &link.next;
@@ -792,6 +826,34 @@ pub const Queue = extern struct {
         queue.insertBefore(&links[1], &links[0]);
 
         try testing.expectEqual(4, queue.len());
+        for (&links, 0..) |*link, i|
+            try testing.expectEqual(link, queue.get(i));
+    }
+
+    /// Replaces an existing link with another one.
+    ///
+    /// Asserts that the list contains the existing but not the replacement
+    /// link.
+    /// The given link may be uninitialized.
+    ///
+    /// This operation has O(1) complexity.
+    pub fn replace(self: *Self, old: *Self.Link, new: *Self.Link) void {
+        return Mixin(Self).replace(self, old, new);
+    }
+
+    test replace {
+        var queue: Queue = undefined;
+        queue.empty();
+        var old_link: Queue.Link = undefined;
+        var links: [4]Queue.Link = undefined;
+
+        queue.insertHead(&old_link);
+        queue.insertAfter(&old_link, &links[1]);
+        queue.insertAfter(&links[1], &links[2]);
+        queue.insertAfter(&links[2], &links[3]);
+
+        queue.replace(&old_link, &links[0]);
+
         for (&links, 0..) |*link, i|
             try testing.expectEqual(link, queue.get(i));
     }
@@ -1039,6 +1101,20 @@ fn Mixin(comptime Self: type) type {
             for (0..idx) |_|
                 _ = it.next() orelse return null;
             return it.next();
+        }
+
+        fn replace(self: *Self, old: *Link, new: *Link) void {
+            assert(self.contains(old));
+            assert(!self.contains(new));
+
+            new.* = old.*;
+            new.prev.* = new;
+            if (new.next) |next| {
+                @branchHint(.likely);
+                next.prev = &new.next;
+            }
+
+            old.* = undefined;
         }
     };
 }
